@@ -18,6 +18,7 @@ import queue
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..core.types import Task
 from ..router.layer import ChannelDecision, WorkerKind
@@ -61,6 +62,7 @@ class WorkerPool:
         device_library: Any | None = None,
         http_kwargs: dict[str, Any] | None = None,
         browser_kwargs: dict[str, Any] | None = None,
+        max_per_domain: int = 20,
     ) -> None:
         """初始化 Worker 池(此时还不启动任何进程)。
 
@@ -71,6 +73,7 @@ class WorkerPool:
         :param device_library: 设备档案库(注入给浏览器 Worker)。
         :param http_kwargs: 透传给 :class:`HttpWorker` 的额外参数。
         :param browser_kwargs: 透传给 :class:`BrowserWorker` 的额外参数。
+        :param max_per_domain: 同一域名同时在途的任务上限。
 
         .. note::
            队列使用 ``multiprocessing.Manager().Queue()`` 代理而非裸 ``mp.Queue``:
@@ -85,9 +88,14 @@ class WorkerPool:
         self.device_library = device_library
         self.http_kwargs = dict(http_kwargs or {})
         self.browser_kwargs = dict(browser_kwargs or {})
+        self.max_per_domain = max(1, int(max_per_domain))
         self.slots: list[WorkerSlot] = []
         self._started = False
         self._manager: Any | None = None
+        # 域名在途计数与"哪个槽位在跑哪个任务",用于每域上限与崩溃释放
+        self._inflight_by_host: dict[str, int] = {}
+        self._task_host: dict[str, str] = {}
+        self._slot_tasks: dict[int, set[str]] = {}
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -167,7 +175,9 @@ class WorkerPool:
     def dispatch(self, task: Task, decision: ChannelDecision) -> bool:
         """把任务投递给对应类型的 Worker。
 
-        同类型有多个 Worker 时,选队列里待办最少的那个(最空闲优先)。
+        同类型有多个 Worker 时,选队列里待办最少的那个(最空闲优先);
+        **同一域名的在途任务不超过** ``max_per_domain``(超出则本次不派发,
+        由调用方稍后重试,避免把一个站点打爆)。
 
         :param task: 待执行任务。
         :param decision: 路由决策,决定 worker 类型。
@@ -177,12 +187,41 @@ class WorkerPool:
         candidates = [s for s in self.slots if s.kind == kind and s.is_alive()]
         if not candidates:
             return False
+
+        host = ""
+        try:
+            host = (urlsplit(task.url).hostname or "").lower()
+        except ValueError:
+            host = ""
+        if host and self._inflight_by_host.get(host, 0) >= self.max_per_domain:
+            return False
+
         slot = min(candidates, key=lambda s: s.pending())
         try:
             slot.inbox.put(task)
-            return True
         except Exception:
             return False
+        if host:
+            self._inflight_by_host[host] = self._inflight_by_host.get(host, 0) + 1
+        self._task_host[task.id] = host
+        self._slot_tasks.setdefault(id(slot), set()).add(task.id)
+        return True
+
+    def release(self, task_id: str) -> None:
+        """释放一个已完成的在途名额(引擎收到结果后调用)。"""
+        host = self._task_host.pop(task_id, None)
+        if host:
+            count = self._inflight_by_host.get(host, 0) - 1
+            if count > 0:
+                self._inflight_by_host[host] = count
+            else:
+                self._inflight_by_host.pop(host, None)
+        for tasks in self._slot_tasks.values():
+            tasks.discard(task_id)
+
+    def inflight_by_host(self) -> dict[str, int]:
+        """返回各域名的在途任务数(监控用)。"""
+        return dict(self._inflight_by_host)
 
     def drain(self, max_items: int = 100, timeout: float = 0.5) -> list[WorkerResult]:
         """从结果队列里取回结果。
@@ -216,6 +255,9 @@ class WorkerPool:
                 slot.process.join(timeout=0.1)
             except Exception:
                 pass
+            # 崩溃槽位在途的任务要释放名额,否则域名并发计数会一直占用
+            for task_id in self._slot_tasks.pop(index, set()):
+                self.release(task_id)
             ctx = mp.get_context("spawn")
             new_slot = self._spawn(ctx, slot.kind)
             new_slot.restarts = slot.restarts + 1

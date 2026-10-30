@@ -528,3 +528,30 @@ AES-128 密文解密往返、m3u8 解析、平台识别、队列媒体记录、c
   显式传 seed 时可复现,便于排障。
 - 网络守卫在 Context 创建时按当前域绑定白名单;跨域时 Context 会被销毁重建,
   守卫随之更新,不会出现"白名单锁死在第一个域"的问题。
+
+### 阶段 2:P0 正确性 + 验证码分支
+
+| 交付 | 内容 |
+|---|---|
+| 租约 + CAS(修报告 D1) | `tasks` 加 `leased_at` / `lease_expires`(schema v2,幂等 ALTER);claim 写租约;`heartbeat()` 续租;`mark_done_checked()` CAS 打卡;`reclaim_expired()` 回收过期租约;引擎每轮回收 + 完成后用 CAS 打卡 |
+| Retry-After + 域名冷却 | `HttpWorker.parse_retry_after()` 支持秒数与 HTTP 日期;429 时按 `Retry-After` 退避(上限 300s)并给该域名设冷却,冷却期内的请求自动延长等待 |
+| Crawl-delay + 每域并发 | `RobotsChecker.crawl_delay()` 暴露 robots 的 Crawl-delay 并参与限速;`WorkerPool.max_per_domain`(默认 20)限制同域在途任务,派发时计数、收到结果时释放、Worker 崩溃时回收名额 |
+| SSRF 加固 | 重定向上限 3→**10 跳**;DNS 判定 **90 秒缓存**(阻断 rebinding);主机名规范化(去 IPv6 zone id / FQDN 尾点);**数字字面量主机名**还原(十进制/十六进制/八进制/省略段/点分四段);补标准库未覆盖的私网段(`100.64/10`、`192.88.99/24`、`198.18/15`、`240/4`、`0.0.0.0/8`) |
+| 验证码分支 | 新增 `meilab/stealth/captcha.py`:ddddocr OCR + cv2 滑块缺口检测;浏览器通道在命中验证码时截图回传;引擎识别成功→回填重试一次,识别不可用→按 §10.4 降级入死信并**如实报出原因** |
+
+真实回执:
+
+```
+retry-after 120s: 120.0
+HTTP date 解析: 89.9 秒
+retry-after bad: 0.0
+同域派发数(上限2): 2 | inflight: {'same.example.com': 2}
+释放一个后 inflight: {'same.example.com': 1}
+领取后状态: {'pending': 0, 'running': 1, ...}
+回收过期租约: 1 → {'pending': 1, 'running': 0, ...}
+```
+
+SSRF 对抗样本 **26 条全部拦截**(tests/test_ssrf.py),覆盖环回/私网/链路本地/CGNAT/
+云元数据/数字字面量/IPv6 zone id/协议白名单。
+
+单测:**150 passed**(新增 test_queue_lease.py 8 条、test_ssrf.py 31 条、test_captcha.py 6 条)。

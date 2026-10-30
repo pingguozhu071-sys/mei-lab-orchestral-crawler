@@ -16,6 +16,7 @@ import ipaddress
 import multiprocessing as mp
 import queue
 import socket
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,21 @@ STOP = "__STOP__"
 
 #: 允许被抓取的协议白名单(其余一律拒绝,防 file:// / gopher / data: 读取)
 ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+#: DNS 判定缓存时长(秒)—— 阻断 DNS rebinding 的同时避免每次请求都解析
+DNS_CACHE_TTL = 90.0
+
+#: 标准库未覆盖、但同样属于内网/保留的地址段
+EXTRA_NON_PUBLIC_NETWORKS = (
+    "100.64.0.0/10",    # CGNAT(运营商级 NAT)
+    "192.88.99.0/24",   # 6to4 继任地址段
+    "198.18.0.0/15",    # 基准测试保留
+    "240.0.0.0/4",      # 保留(未来使用)
+    "0.0.0.0/8",        # 本网络
+)
+
+#: DNS 判定缓存:主机 → (判定时间, IP 列表)
+_DNS_CACHE: dict[str, tuple[float, list[str]]] = {}
 
 
 @dataclass
@@ -42,40 +58,127 @@ class WorkerResult:
     elapsed: float = field(default=0.0)
 
 
+def normalize_host(host: str) -> str:
+    """规范化主机名:去 IPv6 zone id、去 FQDN 尾点、转小写。
+
+    :param host: 原始主机名。
+    :return: 规范化后的主机名。
+    """
+    text = (host or "").strip().lower()
+    if "%" in text:  # IPv6 zone id(fe80::1%eth0)
+        text = text.split("%", 1)[0]
+    if text.endswith("."):  # FQDN 尾点
+        text = text[:-1]
+    return text
+
+
+def numeric_host_to_ip(host: str) -> str | None:
+    """把"数字字面量"主机名解析成 IP。
+
+    覆盖:
+    * 点分四段(``10.0.0.1``);
+    * 十进制(``2130706433``)、十六进制(``0x7f000001``)、八进制(``017700000001``);
+    * 省略段的写法(``127.1`` → ``127.0.0.1``)。
+
+    这些都能绕过"字符串里没有点"的朴素检查。
+
+    :param host: 主机名。
+    :return: 解析出的 IP;不是数字字面量返回 ``None``。
+    """
+    text = normalize_host(host)
+    if not text:
+        return None
+
+    # 1) 已经是合法 IP 字面量
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        pass
+
+    # 2) 纯数字(十进制 / 0x 十六进制 / 前导 0 的八进制)
+    try:
+        return str(ipaddress.ip_address(int(text, 0)))
+    except (ValueError, TypeError):
+        pass
+    if text.isdigit() and len(text) > 1 and text.startswith("0"):
+        try:
+            return str(ipaddress.ip_address(int(text, 8)))
+        except ValueError:
+            pass
+
+    # 3) 省略段写法(inet_aton 语义:最后一段填满低位)
+    parts = text.split(".")
+    if 1 < len(parts) <= 4 and all(p.isdigit() for p in parts):
+        try:
+            numbers = [int(p) for p in parts]
+            if any(number > 255 for number in numbers[:-1]):
+                return None
+            value = 0
+            for index, number in enumerate(numbers[:-1]):
+                value |= number << (8 * (3 - index))
+            value |= numbers[-1]
+            return str(ipaddress.ip_address(value))
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
 def resolve_host_ips(host: str) -> list[str]:
-    """解析主机名的所有 IP 地址。
+    """解析主机名的所有 IP 地址(带 90 秒判定缓存)。
 
     :param host: 主机名或 IP 字面量。
     :return: IP 字符串列表;解析失败时返回空列表。
     """
+    normalized = normalize_host(host)
+    if not normalized:
+        return []
+    cached = _DNS_CACHE.get(normalized)
+    now = time.time()
+    if cached is not None and now - cached[0] < DNS_CACHE_TTL:
+        return list(cached[1])
+
+    literal = numeric_host_to_ip(normalized)
+    if literal is not None:
+        _DNS_CACHE[normalized] = (now, [literal])
+        return [literal]
+
     try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(normalized, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError, OSError):
         return []
     out: list[str] = []
     for info in infos:
-        ip = info[4][0]
+        ip = str(info[4][0])
         if ip not in out:
-            out.append(str(ip))
+            out.append(ip)
+    _DNS_CACHE[normalized] = (now, out)
     return out
 
 
 def is_public_ip(ip: str) -> bool:
     """判断一个 IP 是否属于公网可路由地址。
 
-    环回、私网、链路本地、保留、多播一律判为不安全。
+    环回、私网、链路本地、保留、多播,以及标准库未覆盖的额外地址段
+    (CGNAT / 6to4 / 基准测试 / 保留段)一律判为不安全。
 
     :param ip: IP 字面量。
     :return: 是否为公网地址。
     """
+    text = normalize_host(ip)
     try:
-        addr = ipaddress.ip_address(ip)
+        addr = ipaddress.ip_address(text)
     except ValueError:
         return False
     if addr.is_loopback or addr.is_private or addr.is_link_local:
         return False
     if addr.is_reserved or addr.is_multicast or addr.is_unspecified:
         return False
+    for network in EXTRA_NON_PUBLIC_NETWORKS:
+        try:
+            if addr in ipaddress.ip_network(network):
+                return False
+        except ValueError:
+            continue
     return bool(addr.is_global)
 
 

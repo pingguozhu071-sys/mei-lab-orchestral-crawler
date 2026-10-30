@@ -38,7 +38,10 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 DEFAULT_MAX_RETRIES = 3
 
 #: 队列库的 schema 版本(用 PRAGMA user_version 记录,升级时只增不减)。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: 租约默认时长(秒):超过这个时间没心跳,任务会被回收重跑。
+DEFAULT_LEASE_SECONDS = 120
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -143,18 +146,38 @@ class TaskQueue:
     def _migrate(self) -> None:
         """按 ``PRAGMA user_version`` 记录并推进 schema 版本。
 
-        建表语句都是 ``IF NOT EXISTS`` 的幂等形式,迁移只需更新版本号。
-        PRAGMA 不支持参数绑定,所以按版本写死字面量语句(每个版本一行),
-        升级时新增一行分支即可。
+        建表语句都是 ``IF NOT EXISTS`` 的幂等形式;新增列用"先查列、再 ALTER"的
+        幂等方式补齐。PRAGMA 不支持参数绑定,所以版本号与 ALTER 语句都写成字面量。
         """
         row = self._conn.execute("PRAGMA user_version").fetchone()
         current = int(row[0]) if row else 0
         if current >= SCHEMA_VERSION:
             return
-        if SCHEMA_VERSION == 1:
+
+        # v2:租约字段(幂等 ALTER,语句写死不走拼接)
+        if not self._tasks_has_column("leased_at"):
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN leased_at REAL")
+        if not self._tasks_has_column("lease_expires"):
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN lease_expires REAL")
+
+        if SCHEMA_VERSION == 2:
+            self._conn.execute("PRAGMA user_version = 2")
+        elif SCHEMA_VERSION == 1:
             self._conn.execute("PRAGMA user_version = 1")
         else:
             raise RuntimeError(f"缺少 schema 版本 {SCHEMA_VERSION} 的迁移语句")
+
+    def _tasks_has_column(self, column: str) -> bool:
+        """判断 ``tasks`` 表是否已有某列(列名走参数绑定)。
+
+        :param column: 列名。
+        :return: 是否存在。
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?",
+            (column,),
+        ).fetchone()
+        return bool(row[0]) if row else False
 
     def close(self) -> None:
         """关闭底层连接。"""
@@ -220,10 +243,11 @@ class TaskQueue:
     # ------------------------------------------------------------------ claim
 
     def claim(self, limit: int = 1, worker_id: str | None = None) -> list[Task]:
-        """原子地领取待执行任务。
+        """原子地领取待执行任务(带租约)。
 
-        使用 ``UPDATE ... RETURNING`` 在单条语句内完成 "选中 + 置为 running",
-        因此多进程并发 claim 不会拿到同一个任务。
+        使用 ``UPDATE ... RETURNING`` 在单条语句内完成 "选中 + 置为 running + 写租约",
+        因此多进程并发 claim 不会拿到同一个任务。租约到期后任务会被回收重跑,
+        避免"Worker 崩溃 → 任务永久卡在 running"。
 
         :param limit: 最多领取多少条。
         :param worker_id: 领取者标识,写入 ``tasks.worker_id`` 便于回收。
@@ -232,9 +256,11 @@ class TaskQueue:
         if limit <= 0:
             return []
         now = time.time()
+        expires = now + DEFAULT_LEASE_SECONDS
         rows = self._conn.execute(
             """
-            UPDATE tasks SET status = 'running', worker_id = ?, updated_at = ?
+            UPDATE tasks
+            SET status = 'running', worker_id = ?, leased_at = ?, lease_expires = ?, updated_at = ?
             WHERE id IN (
                 SELECT id FROM tasks
                 WHERE status = 'pending'
@@ -244,11 +270,66 @@ class TaskQueue:
             RETURNING id, url, task_type, priority, status, retry_count, depth,
                       parent_id, payload, created_at, updated_at
             """,
-            (worker_id, now, limit),
+            (worker_id, now, expires, now, limit),
         ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
-    def claim_by_urls(self, urls: list[str], limit: int = 1) -> list[Task]:
+    def heartbeat(self, task_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> bool:
+        """续租(长任务执行期间调用)。
+
+        :param task_id: 任务 ID。
+        :param lease_seconds: 新的租约时长(秒)。
+        :return: 是否续租成功(任务已被别人接管时返回 ``False``)。
+        """
+        now = time.time()
+        cur = self._conn.execute(
+            "UPDATE tasks SET lease_expires = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+            (now + lease_seconds, now, task_id),
+        )
+        return int(cur.rowcount or 0) > 0
+
+    def reclaim_expired(self, now: float | None = None) -> int:
+        """回收**租约过期**的 running 任务(Worker 崩溃/失联时的自愈)。
+
+        :param now: 当前时间戳(默认取系统时间)。
+        :return: 回收条数。
+        """
+        moment = time.time() if now is None else now
+        cur = self._conn.execute(
+            "UPDATE tasks SET status = 'pending', worker_id = NULL, leased_at = NULL, "
+            "lease_expires = NULL, updated_at = ? "
+            "WHERE status = 'running' AND lease_expires IS NOT NULL AND lease_expires < ?",
+            (moment, moment),
+        )
+        return int(cur.rowcount or 0)
+
+    def mark_done_checked(self, task_id: str, leased_at: float | None = None) -> bool:
+        """CAS 打卡:只有**当前租约持有者**才能把任务标记为完成。
+
+        防止"两个 worker 同时处理完同一任务,后完成的那个覆盖先完成的结果"。
+
+        :param task_id: 任务 ID。
+        :param leased_at: 领取时拿到的租约时间戳;为空则不做租约校验。
+        :return: 是否成功打卡(``True``=拿到所有权,``False``=已被接管)。
+        """
+        now = time.time()
+        if leased_at is None:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status = 'done', updated_at = ?, leased_at = NULL, "
+                "lease_expires = NULL WHERE id = ? AND status = 'running'",
+                (now, task_id),
+            )
+        else:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status = 'done', updated_at = ?, leased_at = NULL, "
+                "lease_expires = NULL WHERE id = ? AND status = 'running' AND leased_at = ?",
+                (now, task_id, leased_at),
+            )
+        return int(cur.rowcount or 0) > 0
+
+    def claim_by_urls(
+        self, urls: list[str], limit: int = 1, worker_id: str | None = None
+    ) -> list[Task]:
         """按 URL 精确领取任务(交互式会话用)。
 
         与 :meth:`claim` 的区别:只领取这些 URL 的 pending 任务,
@@ -256,19 +337,22 @@ class TaskQueue:
 
         :param urls: 目标 URL 列表。
         :param limit: 最多领取多少条。
+        :param worker_id: 领取者标识(写入租约)。
         :return: 领取到的任务列表。
         """
         targets = [u for u in urls if u]
         if not targets or limit <= 0:
             return []
         now = time.time()
+        expires = now + DEFAULT_LEASE_SECONDS
         collected: list[sqlite3.Row] = []
         for url in targets:
             if len(collected) >= limit:
                 break
             rows = self._conn.execute(
                 """
-                UPDATE tasks SET status = 'running', updated_at = ?
+                UPDATE tasks
+                SET status = 'running', worker_id = ?, leased_at = ?, lease_expires = ?, updated_at = ?
                 WHERE id IN (
                     SELECT id FROM tasks
                     WHERE status = 'pending' AND url = ?
@@ -278,7 +362,7 @@ class TaskQueue:
                 RETURNING id, url, task_type, priority, status, retry_count, depth,
                           parent_id, payload, created_at, updated_at
                 """,
-                (now, url),
+                (worker_id, now, expires, now, url),
             ).fetchall()
             collected.extend(rows)
         return [self._row_to_task(r) for r in collected[:limit]]
@@ -353,15 +437,16 @@ class TaskQueue:
         now = time.time()
         if worker_ids is None:
             cur = self._conn.execute(
-                "UPDATE tasks SET status = 'pending', worker_id = NULL, updated_at = ? "
-                "WHERE status = 'running'",
+                "UPDATE tasks SET status = 'pending', worker_id = NULL, leased_at = NULL, "
+                "lease_expires = NULL, updated_at = ? WHERE status = 'running'",
                 (now,),
             )
             return int(cur.rowcount or 0)
         total = 0
         for worker_id in worker_ids:
             cur = self._conn.execute(
-                "UPDATE tasks SET status = 'pending', worker_id = NULL, updated_at = ? "
+                "UPDATE tasks SET status = 'pending', worker_id = NULL, leased_at = NULL, "
+                "lease_expires = NULL, updated_at = ? "
                 "WHERE status = 'running' AND worker_id = ?",
                 (now, worker_id),
             )

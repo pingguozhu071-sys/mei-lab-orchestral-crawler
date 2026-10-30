@@ -10,6 +10,7 @@ Worker 的创建逻辑封装在 :class:`~meilab.workers.pool.WorkerPool` 内。
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,8 @@ class EngineConfig:
     max_inflight: int = 8
     vault_key: str | None = None
     cookie_file: str | None = None
+    captcha_retry: bool = True
+    max_per_domain: int = 20
     verbose: bool = False
 
     def resolved_db_path(self) -> str:
@@ -121,6 +124,8 @@ class Engine:
         self.queue = TaskQueue(self.config.resolved_db_path())
         self.vault = Vault(self.config.resolved_vault_path(), key=self.config.vault_key)
         self._pool: WorkerPool | None = None
+        # 领取者标识:写进任务的 worker_id,便于定位是谁领的、回收谁的
+        self._worker_id = f"engine-{os.getpid()}"
 
     def close(self) -> None:
         """关闭 Worker 池与数据库连接。"""
@@ -141,6 +146,7 @@ class Engine:
             browser_workers=self.config.browser_workers,
             headless=self.config.headless,
             device_library=self.device_library,
+            max_per_domain=self.config.max_per_domain,
             http_kwargs={
                 "delay": self.config.delay,
                 "jitter": self.config.jitter,
@@ -236,6 +242,7 @@ class Engine:
                 # 2) 收回结果
                 for result in pool.drain(max_items=10, timeout=0.4):
                     inflight = max(0, inflight - 1)
+                    pool.release(result.task_id)  # 释放域名在途名额
                     self._handle_result(result, summary)
                     processed += 1
 
@@ -243,6 +250,11 @@ class Engine:
                 restarted = pool.reap()
                 for note in restarted:
                     summary.errors.append(f"Worker 重启: {note}")
+
+                # 3b) 回收租约过期的任务(Worker 崩溃 → 任务不会永久卡住)
+                expired = self.queue.reclaim_expired()
+                if expired:
+                    summary.errors.append(f"回收租约过期任务 {expired} 条")
 
                 # 4) 退出条件
                 stats = self.queue.stats()
@@ -287,7 +299,7 @@ class Engine:
         pool = self._ensure_pool()
         # 最多两轮:轻量通道抓到空壳 → 引擎把它标成待升级 → 第二轮走浏览器通道
         for _attempt in range(2):
-            claimed = self.queue.claim_by_urls([url], limit=1)
+            claimed = self.queue.claim_by_urls([url], limit=1, worker_id=self._worker_id)
             if not claimed:
                 break
             task = claimed[0]
@@ -384,6 +396,35 @@ class Engine:
             except Exception:
                 pass
 
+    def _try_solve_captcha(self, url: str, payload: dict[str, Any]) -> str:
+        """尝试识别验证码并回填。
+
+        :param url: 触发挑战的 URL。
+        :param payload: Worker 回传的内容。
+        :return: 识别出的文本;失败返回空串。
+        """
+        from .stealth.captcha import solve
+
+        image = payload.get("captcha_image")
+        background = payload.get("captcha_background")
+        piece = payload.get("captcha_piece")
+        if not (image or background):
+            return ""
+        result = solve(payload.get("html") or "", image=image,
+                       background=background, piece=piece)
+        if not result.ok:
+            return ""
+        if result.kind == "slider":
+            return str(result.meta.get("gap_x", ""))
+        return result.text
+
+    def _retry_task(self, task_id: str) -> None:
+        """把任务放回 pending 以便重试(验证码回填场景)。"""
+        try:
+            self.queue.transition(task_id, TaskStatus.PENDING)
+        except Exception:
+            pass
+
     def _handle_media_task(self, task: Task, summary: CrawlSummary) -> None:
         """处理一个媒体任务:走 media/ 子系统(平台解析器 → 通用 yt-dlp 通道)。
 
@@ -445,11 +486,13 @@ class Engine:
         tasks: list[Task] = []
         remaining = max(0, limit)
         if preferred and remaining:
-            picked = self.queue.claim_by_urls(preferred, limit=remaining)
+            picked = self.queue.claim_by_urls(
+                preferred, limit=remaining, worker_id=self._worker_id
+            )
             tasks.extend(picked)
             remaining -= len(picked)
         if remaining:
-            tasks.extend(self.queue.claim(limit=remaining))
+            tasks.extend(self.queue.claim(limit=remaining, worker_id=self._worker_id))
         return tasks
 
     def _handle_result(self, result: WorkerResult, summary: CrawlSummary) -> None:
@@ -475,8 +518,22 @@ class Engine:
         )
 
         if not ok:
+            # 命中验证码 → 尝试识别并回填重试一次(识别不了直接入死信,不无限重试)
+            if "captcha" in signals and self.config.captcha_retry:
+                solved = self._try_solve_captcha(url, payload)
+                if solved:
+                    episode.outcome = Outcome.DEGRADED
+                    episode.error = f"验证码已识别({solved}),回填后重试"
+                    episode.raw_meta = {"captcha_solved": True, "captcha_text_len": len(solved)}
+                    summary.errors.append(f"{url}: {episode.error}")
+                    self._retry_task(result.task_id)
+                    self.queue.save_episode(episode)
+                    return
+
             episode.outcome = Outcome.BLOCKED if signals else Outcome.FAILED
             episode.error = str(payload.get("error") or result.error or "未知错误")
+            if signals and "captcha" in signals:
+                episode.error += "(验证码识别不可用,按降级策略入死信)"
             summary.failed += 1
             if signals:
                 summary.blocked += 1
@@ -647,10 +704,10 @@ class Engine:
             count += 1
 
     def _finish_task(self, task_id: str, *, success: bool) -> None:
-        """回写任务状态。"""
+        """回写任务状态(用 CAS 打卡,避免覆盖别人已完成的结果)。"""
         try:
             if success:
-                self.queue.mark_done(task_id)
+                self.queue.mark_done_checked(task_id)
             else:
                 self.queue.mark_failed(task_id, retry=True)
         except Exception:

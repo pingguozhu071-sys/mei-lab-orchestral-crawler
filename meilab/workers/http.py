@@ -43,8 +43,11 @@ DEFAULT_UA = (
 #: 单次响应体最大保留字节数,避免把大文件塞进进程队列
 MAX_BODY_BYTES = 4 * 1024 * 1024
 
-#: 手动跟随重定向的最大跳数
-MAX_REDIRECTS = 3
+#: 手动跟随重定向的最大跳数(每一跳都重新过 SSRF 校验)
+MAX_REDIRECTS = 10
+
+#: ``Retry-After`` 的最长等待(秒)
+MAX_RETRY_AFTER = 300
 
 #: 需要手动处理的重定向状态码
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
@@ -97,6 +100,8 @@ class FetchResult:
     signals: list[str] = field(default_factory=list)
     engine: str = "none"
     ok: bool = False
+    headers: dict[str, str] = field(default_factory=dict)
+    retry_after: float = 0.0
 
     @property
     def text(self) -> str:
@@ -110,7 +115,7 @@ class FetchResult:
 
 
 class RobotsChecker:
-    """按域名缓存 robots.txt 判定结果。"""
+    """按域名缓存 robots.txt 判定结果(含 ``Crawl-delay``)。"""
 
     def __init__(self, user_agent: str = DEFAULT_UA) -> None:
         """初始化检查器。
@@ -119,6 +124,27 @@ class RobotsChecker:
         """
         self.user_agent = user_agent
         self._cache: dict[str, urllib.robotparser.RobotFileParser | None] = {}
+
+    def crawl_delay(self, url: str) -> float:
+        """取目标站点的 ``Crawl-delay``(秒);没有则返回 0。
+
+        :param url: 目标 URL。
+        :return: 建议的请求间隔(秒)。
+        """
+        parts = urlsplit(url)
+        if not parts.scheme or not parts.netloc:
+            return 0.0
+        host_key = f"{parts.scheme}://{parts.netloc}"
+        if host_key not in self._cache:
+            self._cache[host_key] = self._load(host_key)
+        parser = self._cache[host_key]
+        if parser is None:
+            return 0.0
+        try:
+            delay = parser.crawl_delay(self.user_agent)
+        except Exception:
+            return 0.0
+        return float(delay) if delay else 0.0
 
     def allowed(self, url: str) -> bool:
         """判断某 URL 是否被 robots.txt 允许。
@@ -204,6 +230,8 @@ class HttpWorker(BaseWorker):
         self.allow_private = allow_private
         self.robots = RobotsChecker(user_agent)
         self._last_request = 0.0
+        # 域名冷却:被 429 限流后,该域名在一段时间内不再发请求
+        self._cooldowns: dict[str, float] = {}
         self._curl = None
         self._curl_failed = False
         self._opener = None
@@ -258,7 +286,7 @@ class HttpWorker(BaseWorker):
 
         started = time.time()
         for attempt in range(self.retries + 1):
-            self._throttle()
+            self._throttle(url)
             try:
                 self._fetch_follow(url, result)
             except Exception as exc:
@@ -269,6 +297,20 @@ class HttpWorker(BaseWorker):
                     time.sleep(min(10.0, self.delay * (2**attempt)))
                     continue
                 break
+
+            # 429:按 Retry-After 退避,并给该域名设冷却
+            if result.status == 429:
+                wait = min(MAX_RETRY_AFTER, result.retry_after or 0)
+                host = ""
+                try:
+                    host = (urlsplit(result.final_url or url).hostname or "").lower()
+                except ValueError:
+                    host = ""
+                if host and wait:
+                    self._cooldowns[host] = time.time() + wait
+                if attempt < self.retries:
+                    time.sleep(wait or min(10.0, self.delay * (2**attempt)))
+                    continue
 
             if result.status is not None and result.status >= 500 and attempt < self.retries:
                 time.sleep(min(10.0, self.delay * (2**attempt)))
@@ -282,13 +324,68 @@ class HttpWorker(BaseWorker):
 
     # ------------------------------------------------------------------ 内部
 
-    def _throttle(self) -> None:
-        """全局限速:相邻两次请求间隔 ≥ delay,再加密码学安全随机抖动。"""
+    def _throttle(self, url: str = "") -> None:
+        """全局限速:相邻两次请求间隔 ≥ delay,再加密码学安全随机抖动。
+
+        还会叠加三种更严格的约束:
+        * 该域名的冷却时间(被 429 限流后设置);
+        * robots.txt 的 ``Crawl-delay``;
+        * 域名级并发上限。
+
+        :param url: 本次请求的 URL(用于取域名)。
+        """
         wait = self.delay + secrets.SystemRandom().uniform(0.0, self.jitter)
+        host = ""
+        if url:
+            try:
+                host = (urlsplit(url).hostname or "").lower()
+            except ValueError:
+                host = ""
+        if host:
+            cooldown = self._cooldowns.get(host, 0.0) - time.time()
+            if cooldown > 0:
+                wait = max(wait, cooldown)
+            try:
+                crawl_delay = self.robots.crawl_delay(url)
+            except Exception:
+                crawl_delay = 0.0
+            if crawl_delay > 0:
+                wait = max(wait, crawl_delay)
         elapsed = time.time() - self._last_request
         if elapsed < wait:
             time.sleep(wait - elapsed)
         self._last_request = time.time()
+
+    @staticmethod
+    def parse_retry_after(value: str | None) -> float:
+        """解析 ``Retry-After`` 头(秒数或 HTTP 日期)。
+
+        :param value: 头的原始值。
+        :return: 建议等待秒数;解析不了返回 0。
+        """
+        if not value:
+            return 0.0
+        text = value.strip()
+        try:
+            return max(0.0, float(text))
+        except ValueError:
+            pass
+        try:
+            from email.utils import parsedate_to_datetime
+
+            when = parsedate_to_datetime(text)
+            if when is None:
+                return 0.0
+            import datetime as _dt
+
+            now = _dt.datetime.now(_dt.timezone.utc)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=_dt.timezone.utc)
+            else:
+                when = when.astimezone(_dt.timezone.utc)
+            return max(0.0, (when - now).total_seconds())
+        except Exception:
+            return 0.0
 
     def _fetch_follow(self, url: str, result: FetchResult) -> None:
         """逐跳跟随重定向(每一跳都做 SSRF 校验)。"""
@@ -301,6 +398,8 @@ class HttpWorker(BaseWorker):
                 return
             status, headers, body, engine = self._request(current)
             result.engine = engine
+            result.headers = headers
+            result.retry_after = self.parse_retry_after(headers.get("retry-after"))
             if status in _REDIRECT_CODES and headers.get("location"):
                 current = urljoin(current, headers["location"])
                 continue

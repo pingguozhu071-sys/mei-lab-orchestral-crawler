@@ -197,6 +197,7 @@ class BrowserWorker(BaseWorker):
                     pass
 
         signals = detect_anti_bot_signals(html, status)
+        captcha = self._capture_captcha(page) if "captcha" in signals else {}
         ok = bool(html) and (status is None or status < 400) and not signals
         return {
             "url": task.url,
@@ -211,7 +212,41 @@ class BrowserWorker(BaseWorker):
             "elapsed": time.time() - started,
             "device_profile": self._profile.name if self._profile else None,
             "blocked_requests": self._guard.summary() if self._guard else {},
+            **captcha,
         }
+
+    def _capture_captcha(self, page: Any) -> dict[str, str]:
+        """截图验证码区域(给引擎的识别分支用)。
+
+        只在页面确实出现验证码挑战时调用;截不到就返回空字典,
+        让引擎按"识别不可用"的降级路径处理。
+
+        :param page: Playwright 页面。
+        :return: ``{"captcha_image": <base64>}`` 或空字典。
+        """
+        import base64
+
+        selectors = (
+            "img[src^='data:image']",
+            ".captcha-image img",
+            "#captcha img",
+            "img[id*='captcha']",
+            "img[class*='captcha']",
+        )
+        for selector in selectors:
+            try:
+                element = page.query_selector(selector)
+                if element is None:
+                    continue
+                data = element.get_attribute("src") or ""
+                if data.startswith("data:image"):
+                    return {"captcha_image": data}
+                shot = element.screenshot()
+                if shot:
+                    return {"captcha_image": base64.b64encode(shot).decode("ascii")}
+            except Exception:
+                continue
+        return {}
 
     # ------------------------------------------------------------------ 内部
 
