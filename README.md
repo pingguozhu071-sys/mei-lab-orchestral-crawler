@@ -53,6 +53,9 @@ mel crawl --url https://quotes.toscrape.com/ --max 20
 # 5) 查看统计 / 导出
 mel stats
 mel export --format markdown --output ./data
+
+# 6) 指纹自检(等同 bot.sannysoft.com 的本地等价物)
+python fingerprint_probe.py
 ```
 
 命令一览:
@@ -125,6 +128,7 @@ meilab/
    浏览器通道默认使用 Patchright Chromium。
 6. **网络可达性**:本机所在网络对 `news.ycombinator.com`、`bot.sannysoft.com`
    连接超时(TCP 层不可达),冒烟改用可达站点;这属于网络环境问题,不是框架缺陷。
+   指纹检测改由仓库根目录的 `fingerprint_probe.py` 承担(同款链路、本地等价检测)。
 
 ## 伦理边界
 
