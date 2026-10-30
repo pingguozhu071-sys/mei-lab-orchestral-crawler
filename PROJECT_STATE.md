@@ -444,7 +444,80 @@ JSON-LD 命中 3 条(含 VideoObject 的 uploadDate/duration/播放量/关键词
 5. **未做的压测**:多站点高并发、长时间运行的内存曲线。
 6. **推送**:本地已完成 git 提交;推送到 GitHub 需要用户提供 SSH 密钥。
 
-## 11. 保守决策记录
+## 11. 打通路线:阶段 0-1 交付回执(2026-10-30)
+
+> 依据《kiana-crawler × mei-lab 对比报告》,按"五阶段全量清零"执行。
+> 每阶段独立提交,独立可交付。
+
+### 阶段 0:契约与骨架(提交 `cccec02`)
+
+| 交付 | 内容 |
+|---|---|
+| `core/types.py` | `MediaItem` / `MediaKind` / `MediaStatus` / `MediaPlatform` / `TaskType.MEDIA` |
+| `core/queue.py` | `media_downloads` 表 + `PRAGMA user_version` 迁移(v1)+ `upsert_media` / `update_media` / `list_media` / `media_stats` |
+| `router/sniff.py` | `Channel.MEDIA` + `detect_media()`(五平台域名/路径 + 媒体直链后缀) |
+| `router/layer.py` | `WorkerKind.MEDIA` + MEDIA 分派 |
+| `engine.py` | 媒体任务不进 Worker 池,走 media/ 子系统 |
+| 安全整改 | 3 处动态拼接 SQL 全部改为参数化语句(`claim_by_urls` / `reclaim_running` / `_reset_urls`) |
+
+实测:`user_version = 1`;媒体记录写入/更新/统计正常;**73 passed**。
+
+### 阶段 1:媒体通道(通用 yt-dlp + m3u8/AES-128 + 五平台 + cookie)
+
+新增 `meilab/media/`(1559 行,7 个模块):
+
+| 模块 | 职责 |
+|---|---|
+| `ytdlp_channel.py` | **通用 yt-dlp 通道**:subprocess 调 `python -m yt_dlp`;`--continue` 续传;`--test` 只取前 10KiB;产物认定用**目录快照差集**(不把 `.part`/`.ytdl` 当成果);JS 运行时自动探测 deno/node |
+| `m3u8_downloader.py` | 标准库解析 m3u8(主/变体流、`EXT-X-KEY`、`EXT-X-MAP`)+ pycryptodome AES-128-CBC 解密 + **分片级续传**(`.state.json` 记进度)+ 分片重试 |
+| `resolvers.py` | 五平台解析:B 站**原生 API**(`view` → `playurl`),抖音/小红书/快手/网易云**委托通用 yt-dlp**(这四家直链需请求签名,自研易被平台变更打断) |
+| `wbi.py` | B 站 WBI 签名(nav 取 key → 置换表混合 → MD5 `w_rid`) |
+| `cookies.py` | cookie 文件校验 / **Fernet 加密存储** / Netscape → `Cookie` 头;密钥取 `MELAB_COOKIE_KEY`(回退 `MELAB_KEY`) |
+| `downloader.py` | 编排:m3u8 → 平台原生直链(自研续传)→ 通用 yt-dlp;每条直链过 SSRF;`.part` + 原子改名 + 字节校验 |
+
+新增命令:`mel media` / `mel resolve` / `mel comments`(+ `mel shell` 交互窗口沿用)。
+
+真实回执:
+
+```
+# 通用 yt-dlp 通道
+ytdlp resolve ok: True | title: master | formats: 27
+ytdlp test-download ok: True | files: ['master [master].mp4'] | partial: [] | size: 6163473
+
+# m3u8 明文(Apple 公共测试流)
+hls: {'ok': True, 'segments': 5, 'bytes': 7717212, 'resumed': False, 'error': ''}
+hls-resume: {'ok': True, 'segments': 5, 'bytes': 4624988, 'resumed': True, 'error': ''}
+master playlist: is_master True variant prog_index.m3u8
+direct: {'ok': True, 'bytes': 5731, 'resumed': False, 'error': ''}
+
+# B 站原生解析
+bilibili item: ('【ASMR/KU100】超级温柔的深度采耳⟡ 让人浑身酥麻的', 'bilibili_api', 1, 453914132)
+$ mel resolve --url https://www.bilibili.com/video/BV1Dvpg6BEt5/
+【ASMR/KU100】超级温柔的深度采耳⟡... (bilibili / bilibili_api)
+时长 6972s · B 站原生 API
+  - 高清 720P | mp4 | 453914132 字节
+
+# B 站 CDN 续传能力(只取 1KB)
+bilibili CDN range: 206 | got bytes: 1024 | content-range: bytes 0-1023/453914132
+```
+
+**B 站评论**:旧接口 `/x/v2/reply` 已被平台弃用(返回 0 条);新接口
+`/x/v2/reply/wbi/main` 即便带正确 WBI 签名 + 浏览器 cookie(buvid3/b_nut)仍返回
+`-403 访问权限不足`。⇒ 结论:**匿名不可读**,需用户自备 cookie(含 SESSDATA);
+已按此实现(`--cookies` 接入请求头),匿名调用时**如实报出平台原因**而非假装成功:
+
+```
+$ mel comments --url https://www.bilibili.com/video/BV1GJ411x7h7/
+评论接口返回 访问权限不足(平台已限制匿名访问;需要用户自备 cookie 才能读取评论)
+```
+
+单测:**89 passed**(新增 tests/test_media.py 16 项,全部离线,含本地构造的
+AES-128 密文解密往返、m3u8 解析、平台识别、队列媒体记录、cookie 加密往返)。
+
+已知超限文件:`media/m3u8_downloader.py` 331 行、`media/resolvers.py` 389 行
+(后者主要是五平台元数据与注释)。
+
+
 
 - `Episode.rounds_runned` 沿用工程书原文拼写(疑似笔误),不做重命名,仅在 docstring 标注。
 - `DeviceProfile.is_mobile` 与 `mobile` 并存:Playwright 的 `is_mobile` 与工程书的

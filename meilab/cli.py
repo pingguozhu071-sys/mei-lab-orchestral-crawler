@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 import click
@@ -176,6 +177,112 @@ def export(fmt: str, output: str, db: str | None) -> None:
     console.print(f"[green]导出完成[/green]: {payload['count']} 条记录,{len(payload['files'])} 个文件")
     for path in payload["files"][:10]:
         console.print(f"  - {path}")
+
+
+@cli.command()
+@click.option("--url", "-u", required=True, help="媒体页面 URL 或直链")
+@click.option("--output", "-o", default="data/media", help="输出目录")
+@click.option("--cookies", default=None, help="用户自备 cookie 文件(Netscape 格式)")
+@click.option("--audio", "audio_only", is_flag=True, help="只要音频")
+@click.option("--prefer", type=click.Choice(["auto", "native", "ytdlp"]), default="auto",
+              help="解析路径偏好:auto=平台优先回落通用通道;native=只用平台解析器;ytdlp=只用通用通道")
+@click.option("--timeout", default=120.0, type=float, help="解析超时(秒)")
+@click.option("--json", "as_json", is_flag=True, help="以 JSON 输出结果")
+def media(
+    url: str,
+    output: str,
+    cookies: str | None,
+    audio_only: bool,
+    prefer: str,
+    timeout: float,
+    as_json: bool,
+) -> None:
+    """抓取媒体(视频/音频):平台解析器 → 通用 yt-dlp 通道。"""
+    from .core.queue import TaskQueue
+    from .media import download_media
+
+    queue = TaskQueue(str(Path(output).parent / "queue.db"))
+    try:
+        result = download_media(
+            url, output, cookies=cookies, audio_only=audio_only,
+            prefer=prefer, timeout=timeout, queue=queue,
+        )
+    finally:
+        queue.close()
+
+    if as_json:
+        console.print_json(json.dumps(result.as_dict(), ensure_ascii=False))
+        return
+    if result.ok:
+        console.print(f"[green]✓[/green] {result.platform} / {result.method} | {result.title}")
+        for path in result.files:
+            console.print(f"  - {path} ({result.bytes} 字节)")
+        console.print(f"  用时 {result.elapsed:.1f}s")
+        if result.note:
+            console.print(f"[dim]{result.note}[/dim]")
+        return
+    console.print(f"[red]✗[/red] {result.error or '抓取失败'}")
+    raise SystemExit(1)
+
+
+@cli.command()
+@click.option("--url", "-u", required=True, help="媒体页面 URL")
+@click.option("--cookies", default=None, help="用户自备 cookie 文件")
+@click.option("--timeout", default=120.0, type=float, help="解析超时(秒)")
+@click.option("--json", "as_json", is_flag=True, help="以 JSON 输出结果")
+def resolve(url: str, cookies: str | None, timeout: float, as_json: bool) -> None:
+    """只解析媒体直链,不下载。"""
+    from .media import detect_platform, resolve_media
+
+    platform = detect_platform(url)
+    item, note = resolve_media(url, platform=platform, cookies=cookies, timeout=timeout)
+    if item is None:
+        console.print(f"[red]解析失败[/red] {note}")
+        raise SystemExit(1)
+    payload = {
+        "platform": item.platform.value,
+        "method": item.method,
+        "title": item.title,
+        "duration": item.duration,
+        "media_id": item.media_id,
+        "needs_cookie": item.needs_cookie,
+        "streams": [
+            {k: v for k, v in stream.items() if k != "url"} for stream in item.streams
+        ],
+        "note": note,
+    }
+    if as_json:
+        console.print_json(json.dumps(payload, ensure_ascii=False))
+        return
+    console.print(f"[cyan]{item.title or item.media_id}[/cyan] "
+                  f"({item.platform.value} / {item.method})")
+    console.print(f"时长 {item.duration:.0f}s · {note}")
+    for stream in item.streams[:10]:
+        console.print(f"  - {stream.get('quality_desc') or stream.get('quality')} "
+                      f"| {stream.get('ext')} | {stream.get('size', 0)} 字节")
+
+
+@cli.command()
+@click.option("--url", "-u", required=True, help="B 站视频页 URL")
+@click.option("--page", default=1, type=int, help="评论页码")
+@click.option("--limit", default=20, type=int, help="最多显示多少条")
+@click.option("--cookies", default=None, help="用户自备 cookie 文件(匿名已被平台限制)")
+@click.option("--json", "as_json", is_flag=True, help="以 JSON 输出结果")
+def comments(url: str, page: int, limit: int, cookies: str | None, as_json: bool) -> None:
+    """抓 B 站视频评论(公开接口,需 WBI 签名;匿名受限时用 --cookies)。"""
+    from .media import bilibili_comments
+
+    items, note = bilibili_comments(url, page=page, cookies=cookies)
+    if as_json:
+        console.print_json(json.dumps({"items": items, "note": note}, ensure_ascii=False))
+        return
+    if not items:
+        console.print(f"[yellow]{note}[/yellow]")
+        return
+    console.print(f"[dim]{note}[/dim]")
+    for item in items[:limit]:
+        console.print(f"[cyan]{item.get('author')}[/cyan] ({item.get('like')} 赞)")
+        console.print(f"  {item.get('message')}")
 
 
 #: 交互式会话的内置命令

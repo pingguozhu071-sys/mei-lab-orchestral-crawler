@@ -53,6 +53,7 @@ class EngineConfig:
     max_links_per_page: int = 20
     max_inflight: int = 8
     vault_key: str | None = None
+    cookie_file: str | None = None
     verbose: bool = False
 
     def resolved_db_path(self) -> str:
@@ -221,12 +222,8 @@ class Engine:
                             summary.channel_counts.get(decision.worker.value, 0) + 1
                         )
                         if decision.worker is WorkerKind.MEDIA:
-                            # 媒体任务不进 Worker 池:由 media/ 子系统处理
-                            # (阶段 1 接线前,明确报错而不是静默丢弃)
-                            self.queue.mark_failed(task.id, retry=False)
-                            summary.failed += 1
-                            summary.errors.append(
-                                f"媒体通道尚未接线(阶段 1 实现): {task.url}")
+                            # 媒体任务不进 Worker 池:由 media/ 子系统直接处理
+                            self._handle_media_task(task, summary)
                             continue
                         if pool.dispatch(task, decision):
                             inflight += 1
@@ -386,6 +383,57 @@ class Engine:
                 )
             except Exception:
                 pass
+
+    def _handle_media_task(self, task: Task, summary: CrawlSummary) -> None:
+        """处理一个媒体任务:走 media/ 子系统(平台解析器 → 通用 yt-dlp 通道)。
+
+        :param task: 媒体任务。
+        :param summary: 统计累加器。
+        """
+        from .media import download_media
+
+        target_dir = Path(self.config.output_dir) / "media"
+        try:
+            result = download_media(
+                task.url,
+                target_dir,
+                cookies=self.config.cookie_file,
+                timeout=self.config.timeout,
+                queue=self.queue,
+            )
+        except Exception as exc:
+            self.queue.mark_failed(task.id, retry=False)
+            summary.failed += 1
+            summary.errors.append(f"媒体任务异常 {task.url}: {exc!r}")
+            return
+
+        episode = Episode(
+            task_id=task.id,
+            url=task.url,
+            outcome=Outcome.SUCCESS if result.ok else Outcome.FAILED,
+            rounds_runned=1,
+            anti_bot_signals=[],
+            channel="media",
+            title=result.title,
+            content="\n".join(result.files),
+            raw_meta={
+                "platform": result.platform,
+                "method": result.method,
+                "files": result.files,
+                "bytes": result.bytes,
+                "duration": result.duration,
+                "note": result.note,
+            },
+            error=result.error,
+        )
+        self.queue.save_episode(episode)
+        if result.ok:
+            summary.succeeded += 1
+            if task.url not in summary.urls:
+                summary.urls.append(task.url)
+        else:
+            summary.failed += 1
+            summary.errors.append(f"{task.url}: {result.error or '媒体抓取失败'}")
 
     def _claim_prioritised(self, preferred: list[str], limit: int) -> list[Task]:
         """领取任务:优先给指定的 URL,剩下的名额再从通用队列里取。
