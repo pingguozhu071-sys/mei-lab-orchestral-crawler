@@ -444,7 +444,7 @@ JSON-LD 命中 3 条(含 VideoObject 的 uploadDate/duration/播放量/关键词
 5. **未做的压测**:多站点高并发、长时间运行的内存曲线。
 6. **推送**:本地已完成 git 提交;推送到 GitHub 需要用户提供 SSH 密钥。
 
-## 10. 保守决策记录
+## 11. 保守决策记录
 
 - `Episode.rounds_runned` 沿用工程书原文拼写(疑似笔误),不做重命名,仅在 docstring 标注。
 - `DeviceProfile.is_mobile` 与 `mobile` 并存:Playwright 的 `is_mobile` 与工程书的
