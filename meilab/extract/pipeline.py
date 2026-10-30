@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,6 +84,63 @@ def _decode(body: bytes | str | None) -> str:
         return bytes(body).decode("utf-8", errors="replace")
     except Exception:
         return ""
+
+
+def _structured_fields(data: Any) -> dict[str, Any]:
+    """从 JSON-LD / hydration state 里挑出有价值的标量字段。
+
+    :param data: 结构化数据。
+    :return: 字段字典(值为标量);没有则返回空字典。
+    """
+    interesting = (
+        "@type", "name", "headline", "description", "datePublished",
+        "dateCreated", "uploadDate", "duration", "author", "keywords",
+        "genre", "interactionStatistic", "viewCount", "interactionCount",
+    )
+    out: dict[str, Any] = {}
+
+    def visit(node: Any, depth: int = 0) -> None:
+        if depth > 4:
+            return
+        if isinstance(node, list):
+            for item in node[:10]:
+                visit(item, depth + 1)
+            return
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            if key in interesting and key not in out:
+                if isinstance(value, (str, int, float, bool)):
+                    out[key] = value
+                elif isinstance(value, dict):
+                    name = value.get("name")
+                    if isinstance(name, str):
+                        out[key] = name
+                    else:
+                        out[key] = _compact(value)
+                elif isinstance(value, list):
+                    compact = _compact(value)
+                    if compact:
+                        out[key] = compact
+            elif key in ("mainEntity", "video", "article", "author", "creator"):
+                visit(value, depth + 1)
+
+    visit(data)
+    return out
+
+
+def _compact(value: Any, limit: int = 600) -> Any:
+    """把嵌套结构压成简短可读的形式。
+
+    :param value: 任意结构。
+    :param limit: 字符串截断长度。
+    :return: 压缩后的值。
+    """
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(value)
+    return text[:limit]
 
 
 class ExtractionPipeline:
@@ -191,6 +249,9 @@ class ExtractionPipeline:
             result.meta["structured_records"] = structured.count
             if not result.title and structured.title:
                 result.title = structured.title
+            fields = _structured_fields(structured.data)
+            if fields:
+                result.meta["structured"] = fields
         if not result.content.strip():
             result.error = "HTML 正文为空"
         return result

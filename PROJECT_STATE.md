@@ -386,7 +386,53 @@ url> :export jsonl
 同 URL 重复粘贴会重置任务状态为 pending(交互语义:再抓一次),
 不影响 `mel resume` 的断点续传语义。
 
-## 9. 已知限制与后续待办
+## 9. 追加交付:B 站页面实抓引发的一轮修复(批次 15 之后)
+
+用户给了 `https://www.bilibili.com/video/BV1Dvpg6BEt5/?share_source=copy_web&vd_source=...`
+要求实抓,由此暴露并修复了 4 个真实问题(全部有实抓回执):
+
+1. **验证码信号误报**。B 站每个页面都会**预加载**风控 SDK
+   (`risk-captcha-sdk/CaptchaLoader.js`),页面里必然出现 "captcha" 字样,
+   于是 `detect_anti_bot_signals` 把正常页面判成 `captcha` 拦截,
+   浏览器通道的 Episode 被标成 blocked。
+   ⇒ 修复:检测前先整段剔除 `<script>`,只对"脚本之外"的组件容器/可见文案
+   判验证码。修复后该页 `signals: []`、`ok: True`。
+   回归验证(真阳性仍要命中):
+   ```
+   '<div class="g-recaptcha"></div>'          -> ['captcha']
+   '<div id="captcha-container">请完成验证</div>' -> ['captcha']
+   '<script src=".../CaptchaLoader.js"></script><p>正常内容</p>' -> []
+   '<script>var captcha=1</script>'           -> []
+   'Just a moment...'                          -> ['status_503', 'cloudflare_challenge']
+   ```
+2. **用户点名的 URL 不优先**。队列里遗留的"已发现链接"会插队,导致用户点了 A 却跑出 B。
+   ⇒ 修复:`_claim_prioritised()` 先按显式 URL 领(`claim_by_urls`),再从通用队列补;
+   `_reset_urls()` 把显式 URL 重置为 pending(允许重跑已抓过的页面)。
+3. **`--max N` 会超发**。在途任务不占预算,空转等待时会多派发。
+   ⇒ 修复:容量 = `min(max_inflight - inflight, budget - inflight)`。
+   修复后 `--max 1` 精确派发 1 个任务。
+4. **结构化数据没进库**。B 站页面的 JSON-LD 里带有 uploadDate / duration /
+   播放量 / 关键词 / 作者,之前只记了条数。
+   ⇒ 修复:`pipeline._structured_fields()` 抽取这些标量字段写入 Episode 的
+   ``raw_meta.structured``。
+
+B 站实抓结果(修复后):
+
+```
+$ mel crawl --url "https://www.bilibili.com/video/BV1Dvpg6BEt5/?share_source=copy_web&vd_source=..." --max 1
+dispatched 1 | succeeded 1 | failed 0 | blocked 0 | unchanged 1 | elapsed 2.05
+已抓取的页面:
+  - https://www.bilibili.com/video/BV1Dvpg6BEt5/?share_source=copy_web&vd_source=...
+通道分布: {'http': 1}
+```
+
+抓到的是该视频的真实简介(1051 字符),标题为
+「【ASMR/KU100】超级温柔的深度采耳⟡ 让人浑身酥麻的舒适感..【鬼花/malice】_哔哩哔哩_bilibili」。
+`unchanged 1` 说明 SHA256 增量比对认出内容与上次一致。
+浏览器通道对比:状态 200、渲染后 DOM 89060 字节、提取 788~1429 字符、
+JSON-LD 命中 3 条(含 VideoObject 的 uploadDate/duration/播放量/关键词)。
+
+## 10. 已知限制与后续待办
 
 1. **超过 300 行的文件(4 个)**:`core/queue.py`、`workers/http.py`、`stealth/profiles.py`、
    `stealth/behavior.py`、`engine.py`。已冻结不再加功能;后续扩展应另开文件。

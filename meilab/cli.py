@@ -97,6 +97,10 @@ def crawl(
     for key in ("queued", "dispatched", "succeeded", "failed", "blocked", "unchanged", "elapsed"):
         table.add_row(key, str(payload.get(key)))
     console.print(table)
+    if payload.get("urls"):
+        console.print("\n[cyan]已抓取的页面:[/cyan]")
+        for item in payload["urls"]:
+            console.print(f"  - {item}")
     if payload.get("channel_counts"):
         console.print("通道分布:", payload["channel_counts"])
     if payload.get("errors"):

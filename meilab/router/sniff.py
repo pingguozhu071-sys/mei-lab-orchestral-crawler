@@ -281,20 +281,31 @@ def detect_anti_bot_signals(html: str | None, status_code: int | None = None) ->
     :param html: 响应正文(可为空)。
     :param status_code: HTTP 状态码,可空。
     :return: 命中的信号名,例如 ``["cloudflare_challenge", "status_403"]``。
+
+    .. note::
+       验证码信号只在**页面里出现验证码组件**时才算命中:很多站点会预加载
+       风控 SDK(例如 ``risk-captcha-sdk/CaptchaLoader.js``),那是"预防性加载",
+       不是真的弹了验证码。所以检测前先把 ``<script>`` 块整段剔除,
+       避免把 SDK 引用误判成拦截。
     """
     signals: list[str] = []
-    body = (html or "").lower()
+    raw = html or ""
+    body = raw.lower()
 
     if status_code in (403, 429, 503):
         signals.append(f"status_{status_code}")
     if "cf-challenge" in body or "cf_chl_opt" in body or "just a moment" in body:
         signals.append("cloudflare_challenge")
-    if "captcha" in body or "recaptcha" in body or "hcaptcha" in body:
-        signals.append("captcha")
     if "attention required" in body and "cloudflare" in body:
         signals.append("cloudflare_block")
     if "access denied" in body or "请开启 javascript" in body or "enable javascript" in body:
         signals.append("js_required")
     if "too many requests" in body or "rate limit" in body:
         signals.append("rate_limited")
+
+    # 验证码:只看脚本之外的部分(组件容器/可见文案)
+    without_scripts = re.sub(r"(?is)<script\b.*?</script>", " ", raw).lower()
+    if re.search(r"(recaptcha|hcaptcha|geetest|g-recaptcha|captcha-container|"
+                 r"captcha_box|验证码)", without_scripts):
+        signals.append("captcha")
     return signals

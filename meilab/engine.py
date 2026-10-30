@@ -86,6 +86,7 @@ class CrawlSummary:
     elapsed: float = 0.0
     channel_counts: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    urls: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """转成字典(便于 CLI 打印与 JSON 输出)。"""
@@ -100,6 +101,7 @@ class CrawlSummary:
             "elapsed": round(self.elapsed, 2),
             "channel_counts": dict(self.channel_counts),
             "errors": self.errors[:10],
+            "urls": self.urls[:20],
         }
 
 
@@ -184,6 +186,9 @@ class Engine:
         for url in urls:
             self.queue.enqueue(Task(url=url))
             summary.queued += 1
+        pending_urls = list(urls)
+        # 显式点名的 URL 允许重跑(之前抓过也要再抓一次)
+        self._reset_urls(urls)
 
         pool = self._build_pool()
         pool.start()
@@ -196,8 +201,17 @@ class Engine:
                     break
 
                 # 1) 取任务并派发
+                #    显式指定的 URL 优先——否则队列里的历史遗留任务会插队,
+                #    用户明明点了某个链接,跑出来的却是别页面。
                 if inflight < self.config.max_inflight:
-                    for task in self.queue.claim(limit=self.config.max_inflight - inflight):
+                    # 剩余预算:--max 1 时只领 1 个,别把队列里的遗留任务一起发出去。
+                    # 在途任务(inflight)也占预算,否则空转等待时会多派发。
+                    budget = (limit - processed) if limit else self.config.max_inflight
+                    capacity = max(0, min(self.config.max_inflight - inflight, budget - inflight))
+                    tasks = self._claim_prioritised(pending_urls, capacity)
+                    for task in tasks:
+                        if task.url in pending_urls:
+                            pending_urls.remove(task.url)
                         if task.payload.get("escalate") == "browser":
                             decision = self.router.route_browser(
                                 task, reason="轻量通道抓到空壳,分层升级到浏览器通道")
@@ -346,10 +360,47 @@ class Engine:
 
     # ------------------------------------------------------------------ 结果处理
 
+    def _reset_urls(self, urls: list[str]) -> None:
+        """把指定 URL 的任务重置为 pending(允许重跑已抓过的页面)。
+
+        :param urls: URL 列表。
+        """
+        targets = [u for u in urls if u]
+        if not targets:
+            return
+        marks = ",".join("?" for _ in targets)
+        try:
+            self.queue.connection.execute(
+                f"UPDATE tasks SET status = 'pending', retry_count = 0, updated_at = ? "
+                f"WHERE url IN ({marks}) AND status IN ('done', 'failed', 'dead_letter')",
+                (time.time(), *targets),
+            )
+        except Exception:
+            pass
+
+    def _claim_prioritised(self, preferred: list[str], limit: int) -> list[Task]:
+        """领取任务:优先给指定的 URL,剩下的名额再从通用队列里取。
+
+        :param preferred: 用户显式指定的 URL 列表。
+        :param limit: 最多领取多少条。
+        :return: 领取到的任务列表。
+        """
+        tasks: list[Task] = []
+        remaining = max(0, limit)
+        if preferred and remaining:
+            picked = self.queue.claim_by_urls(preferred, limit=remaining)
+            tasks.extend(picked)
+            remaining -= len(picked)
+        if remaining:
+            tasks.extend(self.queue.claim(limit=remaining))
+        return tasks
+
     def _handle_result(self, result: WorkerResult, summary: CrawlSummary) -> None:
         """把 Worker 结果转成 Episode,提取内容并落库。"""
         payload = result.payload or {}
         url = str(payload.get("url") or "")
+        if url and url not in summary.urls:
+            summary.urls.append(url)
         status = payload.get("status")
         content_type = str(payload.get("content_type") or "")
         signals = list(payload.get("signals") or [])
