@@ -117,13 +117,53 @@ class Engine:
         self.device_library = DeviceLibrary()
         self.queue = TaskQueue(self.config.resolved_db_path())
         self.vault = Vault(self.config.resolved_vault_path(), key=self.config.vault_key)
+        self._pool: WorkerPool | None = None
 
     def close(self) -> None:
-        """关闭数据库连接。"""
+        """关闭 Worker 池与数据库连接。"""
         try:
-            self.queue.close()
+            self._shutdown_pool()
         finally:
-            self.vault.close()
+            try:
+                self.queue.close()
+            finally:
+                self.vault.close()
+
+    # ------------------------------------------------------------------ Worker 池
+
+    def _build_pool(self) -> WorkerPool:
+        """按配置构造 Worker 池。"""
+        return WorkerPool(
+            http_workers=self.config.http_workers,
+            browser_workers=self.config.browser_workers,
+            headless=self.config.headless,
+            device_library=self.device_library,
+            http_kwargs={
+                "delay": self.config.delay,
+                "jitter": self.config.jitter,
+                "timeout": self.config.timeout,
+                "retries": self.config.retries,
+                "obey_robots": self.config.obey_robots,
+                "use_curl": self.config.use_curl,
+            },
+            browser_kwargs={"timeout": max(self.config.timeout, 45.0)},
+        )
+
+    def _ensure_pool(self) -> WorkerPool:
+        """取得可复用的 Worker 池(交互式会话里避免每次重起进程)。"""
+        if self._pool is None:
+            self._pool = self._build_pool()
+            self._pool.start()
+        return self._pool
+
+    def _shutdown_pool(self) -> None:
+        """停止 Worker 池。"""
+        if self._pool is not None:
+            try:
+                self._pool.stop()
+            except Exception:
+                pass
+            self._pool = None
 
     # ------------------------------------------------------------------ 主循环
 
@@ -145,21 +185,7 @@ class Engine:
             self.queue.enqueue(Task(url=url))
             summary.queued += 1
 
-        pool = WorkerPool(
-            http_workers=self.config.http_workers,
-            browser_workers=self.config.browser_workers,
-            headless=self.config.headless,
-            device_library=self.device_library,
-            http_kwargs={
-                "delay": self.config.delay,
-                "jitter": self.config.jitter,
-                "timeout": self.config.timeout,
-                "retries": self.config.retries,
-                "obey_robots": self.config.obey_robots,
-                "use_curl": self.config.use_curl,
-            },
-            browser_kwargs={"timeout": max(self.config.timeout, 45.0)},
-        )
+        pool = self._build_pool()
         pool.start()
 
         inflight = 0
@@ -211,6 +237,101 @@ class Engine:
 
         summary.elapsed = time.time() - started
         return summary
+
+    def crawl_now(self, url: str) -> dict[str, Any]:
+        """立刻抓一个 URL(交互式会话用):只处理这一个任务,不牵连队列里的其它任务。
+
+        复用常驻 Worker 池,因此连续粘贴多条链接时不必反复起进程。
+
+        :param url: 目标 URL(调用方需先做协议/地址校验)。
+        :return: 结果摘要 ``{"ok", "url", "channel", "title", "length", "elapsed", "error"}``。
+        """
+        started = time.time()
+        outcome: dict[str, Any] = {
+            "ok": False, "url": url, "channel": "", "title": "",
+            "length": 0, "elapsed": 0.0, "error": "", "signals": [],
+        }
+        try:
+            self.queue.enqueue(Task(url=url))
+            # 交互场景:同一个 URL 可能之前已经抓过(done/failed),
+            # 入队是幂等的(只抬优先级),这里显式重置为 pending 以便重跑。
+            self.queue.connection.execute(
+                "UPDATE tasks SET status = 'pending', retry_count = 0, updated_at = ? "
+                "WHERE url = ? AND status IN ('done', 'failed', 'dead_letter')",
+                (time.time(), url),
+            )
+        except Exception as exc:
+            outcome["error"] = f"入队失败: {exc!r}"
+            outcome["elapsed"] = time.time() - started
+            return outcome
+
+        pool = self._ensure_pool()
+        # 最多两轮:轻量通道抓到空壳 → 引擎把它标成待升级 → 第二轮走浏览器通道
+        for _attempt in range(2):
+            claimed = self.queue.claim_by_urls([url], limit=1)
+            if not claimed:
+                break
+            task = claimed[0]
+            if task.payload.get("escalate") == "browser":
+                decision = self.router.route_browser(
+                    task, reason="轻量通道抓到空壳,分层升级到浏览器通道")
+            else:
+                decision = self.router.route(task, sniff_url(task.url))
+            outcome["channel"] = decision.worker.value
+            if not pool.dispatch(task, decision):
+                outcome["error"] = "没有可用的 Worker"
+                outcome["elapsed"] = time.time() - started
+                return outcome
+
+            deadline = time.time() + max(60.0, self.config.timeout * 3)
+            got = False
+            while time.time() < deadline and not got:
+                for result in pool.drain(max_items=1, timeout=1.0):
+                    summary = CrawlSummary()
+                    self._handle_result(result, summary)
+                    payload = result.payload or {}
+                    outcome["signals"] = list(payload.get("signals") or [])
+                    outcome["url"] = str(payload.get("final_url") or url)
+                    outcome["channel"] = result.channel
+                    if summary.succeeded:
+                        outcome["ok"] = True
+                    else:
+                        outcome["error"] = (summary.errors[0] if summary.errors else "抓取失败")
+                    got = True
+            if outcome["ok"] or not got:
+                break
+
+        outcome["elapsed"] = time.time() - started
+        return outcome
+
+    def latest_episode(self, url: str) -> Episode | None:
+        """取某个 URL 最近一次抓取的 Episode(交互式会话显示详情用)。
+
+        :param url: 目标 URL。
+        :return: Episode;没有则返回 ``None``。
+        """
+        rows = self.queue.episodes(limit=50)
+        for row in rows:
+            if row.get("url") == url:
+                return Episode(
+                    id=str(row["id"]),
+                    task_id=str(row["task_id"]),
+                    url=str(row["url"]),
+                    outcome=Outcome(str(row["outcome"])),
+                    rounds_runned=int(row["rounds_runned"]),
+                    anti_bot_signals=list(row.get("anti_bot_signals") or []),
+                    channel=str(row["channel"]),
+                    http_status=row.get("http_status"),
+                    content_type=row.get("content_type") or "",
+                    title=str(row.get("title") or ""),
+                    content_hash=str(row.get("content_hash") or ""),
+                    content=str(row.get("content") or ""),
+                    raw_meta=dict(row.get("raw_meta") or {}),
+                    error=str(row.get("error") or ""),
+                    started_at=float(row.get("started_at") or 0.0),
+                    finished_at=float(row.get("finished_at") or 0.0),
+                )
+        return None
 
     def resume(self, max_tasks: int = 0) -> CrawlSummary:
         """断点续传:继续处理队列里剩下的任务。

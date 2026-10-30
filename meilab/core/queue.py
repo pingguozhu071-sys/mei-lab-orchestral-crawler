@@ -203,6 +203,37 @@ class TaskQueue:
         ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
+    def claim_by_urls(self, urls: list[str], limit: int = 1) -> list[Task]:
+        """按 URL 精确领取任务(交互式会话用)。
+
+        与 :meth:`claim` 的区别:只领取这些 URL 的 pending 任务,
+        不会把队列里其它遗留任务一起捞走。
+
+        :param urls: 目标 URL 列表。
+        :param limit: 最多领取多少条。
+        :return: 领取到的任务列表。
+        """
+        targets = [u for u in urls if u]
+        if not targets or limit <= 0:
+            return []
+        now = time.time()
+        marks = ",".join("?" for _ in targets)
+        rows = self._conn.execute(
+            f"""
+            UPDATE tasks SET status = 'running', updated_at = ?
+            WHERE id IN (
+                SELECT id FROM tasks
+                WHERE status = 'pending' AND url IN ({marks})
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+            )
+            RETURNING id, url, task_type, priority, status, retry_count, depth,
+                      parent_id, payload, created_at, updated_at
+            """,
+            (now, *targets, limit),
+        ).fetchall()
+        return [self._row_to_task(r) for r in rows]
+
     # ------------------------------------------------------------ 状态与回写
 
     def transition(self, task_id: str, new_status: TaskStatus | str) -> None:

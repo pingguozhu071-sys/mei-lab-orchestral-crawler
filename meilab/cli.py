@@ -174,6 +174,141 @@ def export(fmt: str, output: str, db: str | None) -> None:
         console.print(f"  - {path}")
 
 
+#: 交互式会话的内置命令
+SHELL_COMMANDS = {
+    ":help": "显示帮助",
+    ":stats": "查看任务/仓库统计",
+    ":export [格式]": "导出内容(jsonl/csv/markdown/xlsx)",
+    ":latest": "显示上一次抓取的正文摘要",
+    ":quit": "退出会话",
+}
+
+
+def _normalize_pasted(text: str) -> str:
+    """把粘贴的文本整理成 URL(去空白、引号、句末标点)。
+
+    :param text: 原始输入。
+    :return: 清理后的字符串。
+    """
+    cleaned = (text or "").strip().strip("'\"`<>")
+    cleaned = cleaned.rstrip(".,;!?，。；！？")
+    return cleaned.strip()
+
+
+def _run_shell(engine: Engine) -> None:
+    """交互式会话:粘贴链接按 Enter 立刻爬。
+
+    :param engine: 已构造好的引擎(生命周期由调用方负责关闭)。
+    """
+    from .workers.base import check_url_safe
+
+    console.print("[bold cyan]mei-lab-orchestral-crawler 交互窗口[/bold cyan]")
+    console.print("粘贴一条链接按 [bold]Enter[/bold] 即可抓取;输入 [bold]:help[/bold] 看命令,"
+                  "[bold]:quit[/bold] 退出。\n")
+
+    last_url = ""
+    while True:
+        try:
+            raw = console.input("[bold green]url>[/bold green] ")
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[yellow]会话结束。[/yellow]")
+            return
+
+        text = _normalize_pasted(raw)
+        if not text:
+            continue
+
+        # 内置命令
+        if text.startswith(":"):
+            command = text.lower()
+            if command in (":q", ":quit", ":exit"):
+                console.print("[yellow]会话结束。[/yellow]")
+                return
+            if command == ":help":
+                for key, desc in SHELL_COMMANDS.items():
+                    console.print(f"  [cyan]{key:<16}[/cyan] {desc}")
+                continue
+            if command == ":stats":
+                payload = engine.stats()
+                console.print(f"任务: {json.dumps(payload.get('tasks', {}), ensure_ascii=False)}")
+                console.print(f"仓库: {json.dumps(payload.get('vault', {}), ensure_ascii=False)}")
+                console.print(f"通道: {json.dumps(payload.get('channels', {}), ensure_ascii=False)}")
+                continue
+            if command.startswith(":export"):
+                parts = text.split()
+                fmt = parts[1] if len(parts) > 1 else "markdown"
+                result = engine.export(fmt)
+                if result.get("error"):
+                    console.print(f"[red]导出失败:[/red] {result['error']}")
+                else:
+                    console.print(f"[green]已导出[/green] {result['count']} 条 → {len(result['files'])} 个文件")
+                continue
+            if command == ":latest":
+                episode = engine.latest_episode(last_url) if last_url else None
+                if episode is None:
+                    console.print("[yellow]还没有抓取记录。[/yellow]")
+                else:
+                    console.print(f"[cyan]{episode.title or episode.url}[/cyan] "
+                                  f"({len(episode.content)} 字符 / {episode.channel})")
+                    console.print(episode.content[:500] or "(无正文)")
+                continue
+            console.print(f"[red]未知命令[/red] {text}(输入 :help 查看)")
+            continue
+
+        # 粘贴的可能是整段文本,取出其中第一个看起来像 URL 的片段
+        candidate = text.split()[0] if text.split() else text
+        if "://" not in candidate:
+            candidate = text
+
+        # 安全校验:只允许 http/https,拒绝 localhost/环回/私网/保留地址
+        safe, why = check_url_safe(candidate)
+        if not safe:
+            console.print(f"[red]拒绝抓取[/red] {candidate}\n  原因: {why}")
+            continue
+
+        console.print(f"[dim]抓取中…[/dim] {candidate}")
+        outcome = engine.crawl_now(candidate)
+        last_url = str(outcome.get("url") or candidate)
+        if outcome.get("ok"):
+            episode = engine.latest_episode(last_url)
+            title = episode.title if episode else ""
+            length = len(episode.content) if episode else 0
+            console.print(
+                f"[green]✓[/green] {outcome.get('channel')} 通道 | {title or '(无标题)'} | "
+                f"{length} 字符 | {outcome.get('elapsed', 0):.1f}s"
+            )
+        else:
+            console.print(f"[red]✗[/red] {outcome.get('error') or '抓取失败'}")
+
+
+@cli.command()
+@click.option("--db", default=None, help="队列数据库路径")
+@click.option("--output", "-o", default="data", help="输出目录")
+@click.option("--http-workers", default=2, type=int, help="HTTP Worker 数量")
+@click.option("--browser-workers", default=1, type=int, help="浏览器 Worker 数量")
+@click.option("--delay", default=1.5, type=float, help="请求最小间隔(秒,下限 1.5)")
+@click.option("--timeout", default=20.0, type=float, help="单次抓取超时(秒)")
+@click.option("--headless/--headed", default=True, help="浏览器是否无头运行")
+@click.option("--ignore-robots/--respect-robots", default=False, help="是否忽略 robots.txt")
+def shell(
+    db: str | None,
+    output: str,
+    http_workers: int,
+    browser_workers: int,
+    delay: float,
+    timeout: float,
+    headless: bool,
+    ignore_robots: bool,
+) -> None:
+    """交互窗口:粘贴链接按 Enter 直接爬。"""
+    engine = _engine(db, output, http_workers, browser_workers, delay, timeout,
+                     headless, not ignore_robots, False)
+    try:
+        _run_shell(engine)
+    finally:
+        engine.close()
+
+
 def main() -> None:
     """CLI 入口(被 pyproject 的 ``mel`` 脚本调用)。"""
     try:

@@ -50,6 +50,9 @@ python -m venv .venv
 # 4) 抓取
 mel crawl --url https://quotes.toscrape.com/ --max 20
 
+# 4b) 交互窗口:粘贴链接按 Enter 直接爬(推荐日常使用)
+mel shell
+
 # 5) 查看统计 / 导出
 mel stats
 mel export --format markdown --output ./data
@@ -62,10 +65,33 @@ python fingerprint_probe.py
 
 | 命令 | 作用 |
 |---|---|
+| `mel shell` | **交互窗口**:粘贴链接按 Enter 直接爬(见下) |
 | `mel crawl --url URL [--url URL2] [--max N]` | 抓取(默认遵守 robots.txt,全局限速 ≥1.5s) |
 | `mel resume [--max N]` | 断点续传:继续处理队列里未完成的任务 |
 | `mel stats` | 任务 / Episode / 仓库统计,含轻量 vs 浏览器通道占比 |
 | `mel export --format markdown\|jsonl\|csv\|xlsx --output DIR` | 导出(按域名分目录) |
+
+### 交互窗口(`mel shell`)
+
+```
+$ mel shell
+mei-lab-orchestral-crawler 交互窗口
+粘贴一条链接按 Enter 即可抓取;输入 :help 看命令,:quit 退出。
+
+url> 抓取中… https://quotes.toscrape.com/
+✓ http 通道 | Quotes to Scrape | 2533 字符 | 2.6s
+url> https://quotes.toscrape.com/js/
+✓ browser 通道 | Quotes to Scrape | 1429 字符 | 4.1s
+url> :quit
+会话结束。
+```
+
+* 粘贴即抓:整段复制来的文本会自动挑出其中的 URL(去引号、去句末标点)。
+* 常驻 Worker 池:连续粘贴多条链接不必反复起进程,单条约 2~4 秒。
+* 自动分层:轻量通道抓到空壳页会自动升级到浏览器通道再抓一次。
+* 内置命令:`:help` `:stats` `:latest` `:export [jsonl|csv|markdown|xlsx]` `:quit`。
+* 输入的 URL 会先做安全校验(仅 http/https,拒绝 localhost/环回/私网/保留地址),
+  不通过会直接给出原因并跳过。
 
 ## 目录结构
 

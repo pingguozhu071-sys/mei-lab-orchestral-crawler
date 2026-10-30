@@ -349,7 +349,44 @@ tests\test_sniff.py ...............         [100%]
 ============================= 59 passed in 1.19s ==============================
 ```
 
-## 8. 已知限制与后续待办
+## 8. 追加交付:交互窗口 `mel shell`(批次 15 之后)
+
+用户需求:「复制一条链接按 Enter 就能直接爬」。
+
+| 项 | 实现 |
+|---|---|
+| 入口 | `mel shell`(新增 click 子命令,实现在 `cli.py` 内,未新增包内模块) |
+| 交互 | 粘贴整段文本 → 自动挑出其中第一个 URL(去空白/引号/句末标点)→ Enter 即抓 |
+| 性能 | Worker 池**常驻复用**(`Engine._ensure_pool`),连续粘贴不必反复起进程,单条约 2~4 秒 |
+| 分层 | `crawl_now()` 内含升级回环:轻量通道抓到空壳 → 引擎标 `escalate` → 第二轮走浏览器通道 |
+| 命令 | `:help` `:stats` `:latest` `:export [jsonl|csv|markdown|xlsx]` `:quit` |
+| 安全 | 输入即校验:仅 http/https,拒绝 localhost/环回/私网/保留地址(`workers.base.check_url_safe`) |
+| 队列 | 新增 `TaskQueue.claim_by_urls()`:只领取指定 URL 的任务,不牵连队列里的遗留任务 |
+
+实测回执:
+
+```
+url> 拒绝抓取 http://127.0.0.1:8080/admin
+  原因: 目标 IP 127.0.0.1(127.0.0.1) 不是公网地址,按 SSRF 防护策略拒绝
+url> 拒绝抓取 file:///C:/Windows/win.ini
+  原因: 协议 'file' 不在允许列表 ['http', 'https']
+url> 抓取中… https://quotes.toscrape.com/
+✓ http 通道 | Quotes to Scrape | 2533 字符 | 2.6s
+url> 抓取中… https://quotes.toscrape.com/js/
+✓ browser 通道 | Quotes to Scrape | 1429 字符 | 4.1s
+url> 抓取中… https://httpbin.org/json
+✓ http 通道 | Wake up to WonderWidgets! | 223 字符 | 2.6s
+url> :latest
+Quotes to Scrape (1429 字符 / browser)
+"The world as we have created it is a process of our thinking…"
+url> :export jsonl
+已导出 22 条 → 2 个文件
+```
+
+同 URL 重复粘贴会重置任务状态为 pending(交互语义:再抓一次),
+不影响 `mel resume` 的断点续传语义。
+
+## 9. 已知限制与后续待办
 
 1. **超过 300 行的文件(4 个)**:`core/queue.py`、`workers/http.py`、`stealth/profiles.py`、
    `stealth/behavior.py`、`engine.py`。已冻结不再加功能;后续扩展应另开文件。
@@ -361,7 +398,7 @@ tests\test_sniff.py ...............         [100%]
 5. **未做的压测**:多站点高并发、长时间运行的内存曲线。
 6. **推送**:本地已完成 git 提交;推送到 GitHub 需要用户提供 SSH 密钥。
 
-## 9. 保守决策记录
+## 10. 保守决策记录
 
 - `Episode.rounds_runned` 沿用工程书原文拼写(疑似笔误),不做重命名,仅在 docstring 标注。
 - `DeviceProfile.is_mobile` 与 `mobile` 并存:Playwright 的 `is_mobile` 与工程书的
