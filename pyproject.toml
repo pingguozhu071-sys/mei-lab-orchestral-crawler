@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meilab-orchestral-crawler"
+version = "0.1.0"
+description = "分层调度 + 多格式提取 + 反检测的 Python 爬虫框架"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    # --- 原始封闭集合 ---
+    "pydantic>=2.6,<3",
+    "click>=8.1",
+    "rich>=13.0",
+    "beautifulsoup4>=4.12",
+    "markdownify>=0.11",
+    "cryptography>=42.0",
+    # --- 第 10 节追加组件(版本钉死) ---
+    "curl_cffi==0.16.0",
+    "patchright==1.61.2",
+    "playwright==1.62.0",
+    "trafilatura==2.2.0",
+    "lxml==6.1.1",
+    "orjson==3.11.9",
+    "openpyxl==3.1.5",
+    "ddddocr==1.6.1",
+    "opencv-python-headless==5.0.0.93",
+    "numpy==2.5.2",
+    "pycryptodome==3.23.0",
+    "yt-dlp[default]==2026.7.4",
+]
+
+[project.optional-dependencies]
+pdf = ["pymupdf>=1.24"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mel = "meilab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["meilab*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --basetemp: Windows 上 pytest 默认会在临时目录建 "pytest-current" 符号链接,
+# 清理时抛 PermissionError([WinError 5]),与被测代码无关,改用项目内固定临时目录。
+addopts = "-q --basetemp=.pytest_tmp"

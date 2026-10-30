@@ -1,0 +1,26 @@
+# 虚拟环境
+.venv/
+venv/
+
+# 运行产物
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 测试缓存
+.pytest_cache/
+.pytest_tmp/
+
+# 安全工具(会话级状态,不入库)
+.mimosa/
+
+# 临时脚本
+.tmp_*.py
