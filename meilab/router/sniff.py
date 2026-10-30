@@ -35,6 +35,7 @@ class Channel(str, Enum):
     DIRECT_JSON = "direct_json"  # JSON API,直接解析
     BROWSER = "browser"          # 需要 JS 渲染或强反爬
     PDF = "pdf"                  # PDF 提取管线
+    MEDIA = "media"              # 视频/音频媒体通道(yt-dlp / m3u8 / 平台解析器)
 
 
 class SniffResult(BaseModel):
@@ -49,7 +50,8 @@ class SniffResult(BaseModel):
     reasons: list[str] = Field(default_factory=list, description="判定依据")
     requires_js: bool = Field(default=False, description="是否可能需要 JS 渲染")
     anti_bot_hint: bool = Field(default=False, description="是否命中反爬特征")
-    suggested_type: str = Field(default="crawl", description="建议的任务类型:crawl / json_api / pdf / image")
+    suggested_type: str = Field(default="crawl", description="建议的任务类型:crawl / json_api / pdf / image / media")
+    platform: str = Field(default="generic", description="媒体平台标识(非媒体任务恒为 generic)")
 
     @property
     def is_json(self) -> bool:
@@ -85,6 +87,29 @@ _SUFFIX_TYPES: dict[str, ContentType] = {
     ".ico": ContentType.IMAGE,
     ".bmp": ContentType.IMAGE,
 }
+
+#: 媒体域名特征 → 平台标识(用于选择专用解析器)
+PLATFORM_HOSTS: dict[str, str] = {
+    "bilibili.com": "bilibili",
+    "b23.tv": "bilibili",
+    "douyin.com": "douyin",
+    "iesdouyin.com": "douyin",
+    "v.douyin.com": "douyin",
+    "xiaohongshu.com": "xiaohongshu",
+    "xhslink.com": "xiaohongshu",
+    "kuaishou.com": "kuaishou",
+    "gifshow.com": "kuaishou",
+    "chenzhongtech.com": "kuaishou",
+    "music.163.com": "netease_music",
+    "youtube.com": "generic",
+    "youtu.be": "generic",
+}
+
+#: 媒体文件后缀(直链)
+MEDIA_SUFFIXES = (
+    ".m3u8", ".mp4", ".flv", ".mkv", ".webm", ".mov",
+    ".mp3", ".flac", ".m4a", ".wav", ".aac", ".ogg",
+)
 
 #: 路径中出现即视为 API 的关键词
 _API_PATH_RE = re.compile(
@@ -132,14 +157,48 @@ def _query_of(url: str) -> dict[str, list[str]]:
         return {}
 
 
+def detect_media(url: str) -> tuple[str, str] | None:
+    """判断 URL 是否是媒体资源。
+
+    :param url: 待判断的 URL。
+    :return: ``(平台标识, 种类)``;不是媒体资源返回 ``None``。
+    """
+    host = _host_of(url)
+    path = _path_of(url).lower()
+    if not host:
+        return None
+
+    # 1) 媒体直链(后缀判定优先于域名,避免把 CDN 直链误认成平台页面)
+    for suffix in MEDIA_SUFFIXES:
+        if path.endswith(suffix):
+            kind = "audio" if suffix in (".mp3", ".flac", ".m4a", ".wav", ".aac", ".ogg") else "video"
+            return ("generic", kind)
+
+    # 2) 平台域名(含子域)
+    for domain, platform in PLATFORM_HOSTS.items():
+        if host == domain or host.endswith("." + domain):
+            kind = "audio" if platform == "netease_music" else "video"
+            return (platform, kind)
+
+    # 3) 平台 URL 路径特征(短链域名之外的兜底)
+    if re.search(r"/video/(bv[0-9a-z]+)", path):
+        return ("bilibili", "video")
+    if "/share/video/" in path or "/share/slides/" in path:
+        return ("douyin", "video")
+    if "/short_video/" in path or "/f/" in path:
+        return ("kuaishou", "video")
+    return None
+
+
 def sniff_url(url: str) -> SniffResult:
     """对 URL 做静态嗅探。
 
     判定顺序(先命中先返回):
     1. 反爬特征 → 浏览器通道;
-    2. 文件后缀 → 对应类型;
-    3. API 路径模式 → JSON 直取;
-    4. 查询参数要 JSON → JSON 直取;
+    2. 媒体资源(平台页/媒体直链) → 媒体通道;
+    3. 文件后缀 → 对应类型;
+    4. API 路径模式 → JSON 直取;
+    5. 查询参数要 JSON → JSON 直取;
     5. SPA 路径模式 → 浏览器通道;
     6. 兜底 → HTML + 轻量通道。
 
@@ -169,7 +228,21 @@ def sniff_url(url: str) -> SniffResult:
             requires_js=True,
         )
 
-    # 2) 文件后缀
+    # 2) 媒体资源(视频/音频):平台页面或媒体直链
+    media = detect_media(url)
+    if media is not None:
+        platform, kind = media
+        return SniffResult(
+            url=url,
+            content_type=ContentType.UNKNOWN,
+            channel=Channel.MEDIA,
+            confidence=0.75,
+            reasons=[f"媒体资源:平台 {platform} / 种类 {kind}"],
+            suggested_type="media",
+            platform=platform,
+        )
+
+    # 3) 文件后缀
     dot = lower_path.rfind(".")
     if dot != -1:
         suffix = lower_path[dot:]

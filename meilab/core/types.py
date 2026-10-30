@@ -1,4 +1,4 @@
-"""核心数据模型:Task / Episode / DeviceProfile / RoundState。
+"""核心数据模型:Task / Episode / DeviceProfile / RoundState / MediaItem。
 
 全部使用 Pydantic v2(BaseModel + ConfigDict),用于在进程边界(multiprocessing
 队列)传递结构化数据。所有模型均 ``extra="forbid"``,避免拼写错误的字段被静默吞掉。
@@ -31,6 +31,67 @@ class TaskType(str, Enum):
     JSON_API = "json_api"
     PDF = "pdf"
     IMAGE = "image"
+    MEDIA = "media"
+
+
+class MediaKind(str, Enum):
+    """媒体种类。"""
+
+    VIDEO = "video"
+    AUDIO = "audio"
+    IMAGE = "image"
+    LIVE = "live"
+
+
+class MediaStatus(str, Enum):
+    """媒体下载任务的状态机取值,与 ``media_downloads`` 表一一对应。"""
+
+    PENDING = "pending"
+    RESOLVING = "resolving"
+    DOWNLOADING = "downloading"
+    DONE = "done"
+    FAILED = "failed"
+    DEAD_LETTER = "dead_letter"
+
+
+class MediaPlatform(str, Enum):
+    """平台标识。``GENERIC`` 表示走通用 yt-dlp 通道。"""
+
+    GENERIC = "generic"
+    BILIBILI = "bilibili"
+    DOUYIN = "douyin"
+    XIAOHONGSHU = "xiaohongshu"
+    KUAISHOU = "kuaishou"
+    NETEASE_MUSIC = "netease_music"
+
+
+class MediaItem(BaseModel):
+    """一个媒体条目的统一描述(对齐 kiana-crawler 的 MediaItem schema)。
+
+    平台解析器与通用 yt-dlp 通道都产出这个结构,下游不关心来源差异。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(description="来源 URL(页面或直链)")
+    media_id: str = Field(default="", description="平台内的媒体 ID(如 B 站 BV 号)")
+    kind: MediaKind = Field(default=MediaKind.VIDEO, description="媒体种类")
+    platform: MediaPlatform = Field(default=MediaPlatform.GENERIC, description="平台")
+    streams: list[dict[str, Any]] = Field(default_factory=list, description="可下载流列表")
+    images: list[str] = Field(default_factory=list, description="图片直链列表")
+    method: str = Field(default="", description="解析方式:platform_resolver / ytdlp / m3u8")
+    title: str = Field(default="", description="标题")
+    duration: float = Field(default=0.0, ge=0, description="时长(秒)")
+    needs_cookie: bool = Field(default=False, description="是否需要登录态才能拿到最佳流")
+    meta: dict[str, Any] = Field(default_factory=dict, description="平台附加元数据")
+
+    @property
+    def best_stream(self) -> dict[str, Any] | None:
+        """挑一个最优流:优先有直链、码率高的那条。"""
+        usable = [s for s in self.streams if s.get("url")]
+        if not usable:
+            return None
+        return max(usable, key=lambda s: float(s.get("bitrate") or 0))
 
 
 class Outcome(str, Enum):

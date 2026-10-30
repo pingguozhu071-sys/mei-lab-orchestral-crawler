@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from .core.queue import TaskQueue, default_db_path
 from .core.types import Episode, Outcome, Task, TaskStatus
 from .extract.pipeline import ExtractionPipeline
-from .router.layer import LayeredRouter
+from .router.layer import LayeredRouter, WorkerKind
 from .router.sniff import sniff_url
 from .stealth.profiles import DeviceLibrary
 from .storage.export import export as export_records
@@ -220,6 +220,14 @@ class Engine:
                         summary.channel_counts[decision.worker.value] = (
                             summary.channel_counts.get(decision.worker.value, 0) + 1
                         )
+                        if decision.worker is WorkerKind.MEDIA:
+                            # 媒体任务不进 Worker 池:由 media/ 子系统处理
+                            # (阶段 1 接线前,明确报错而不是静默丢弃)
+                            self.queue.mark_failed(task.id, retry=False)
+                            summary.failed += 1
+                            summary.errors.append(
+                                f"媒体通道尚未接线(阶段 1 实现): {task.url}")
+                            continue
                         if pool.dispatch(task, decision):
                             inflight += 1
                             summary.dispatched += 1
@@ -368,15 +376,16 @@ class Engine:
         targets = [u for u in urls if u]
         if not targets:
             return
-        marks = ",".join("?" for _ in targets)
-        try:
-            self.queue.connection.execute(
-                f"UPDATE tasks SET status = 'pending', retry_count = 0, updated_at = ? "
-                f"WHERE url IN ({marks}) AND status IN ('done', 'failed', 'dead_letter')",
-                (time.time(), *targets),
-            )
-        except Exception:
-            pass
+        now = time.time()
+        for url in targets:
+            try:
+                self.queue.connection.execute(
+                    "UPDATE tasks SET status = 'pending', retry_count = 0, updated_at = ? "
+                    "WHERE url = ? AND status IN ('done', 'failed', 'dead_letter')",
+                    (now, url),
+                )
+            except Exception:
+                pass
 
     def _claim_prioritised(self, preferred: list[str], limit: int) -> list[Task]:
         """领取任务:优先给指定的 URL,剩下的名额再从通用队列里取。

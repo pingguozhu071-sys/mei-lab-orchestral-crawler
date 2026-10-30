@@ -18,10 +18,11 @@ from .sniff import Channel, ContentType, SniffResult, sniff_url
 
 
 class WorkerKind(str, Enum):
-    """Worker 种类,对应 workers/ 下的两类实现。"""
+    """Worker 种类,对应 workers/ 下的实现与媒体通道。"""
 
     HTTP = "http"
     BROWSER = "browser"
+    MEDIA = "media"  # 媒体通道:由 media/ 子系统处理(yt-dlp / m3u8 / 平台解析器)
 
 
 class ChannelDecision(BaseModel):
@@ -76,6 +77,12 @@ class LayeredRouter:
         result = sniff_result if sniff_result is not None else sniff_url(task.url)
 
         # 任务类型优先于 URL 猜测:调用方显式声明的语义更可信。
+        if task.task_type is TaskType.MEDIA:
+            return self._decision(
+                task, result, WorkerKind.MEDIA, Channel.MEDIA, ContentType.UNKNOWN,
+                "任务类型显式声明为媒体,走媒体通道",
+                timeout=self.http_timeout, max_rounds=1,
+            )
         if task.task_type is TaskType.PDF:
             return self._decision(
                 task, result, WorkerKind.HTTP, Channel.PDF, ContentType.PDF,
@@ -96,6 +103,12 @@ class LayeredRouter:
             )
 
         # 内容层 → 成本层
+        if result.channel is Channel.MEDIA:
+            return self._decision(
+                task, result, WorkerKind.MEDIA, Channel.MEDIA, ContentType.UNKNOWN,
+                "嗅探判定为媒体资源,走媒体通道(平台解析器 → 通用 yt-dlp)",
+                timeout=self.http_timeout, max_rounds=1,
+            )
         if result.channel is Channel.BROWSER:
             stealth = result.anti_bot_hint
             return self._decision(

@@ -8,6 +8,7 @@ from meilab.router.sniff import (
     Channel,
     ContentType,
     detect_anti_bot_signals,
+    detect_media,
     refine_with_content_type,
     sniff_url,
 )
@@ -82,3 +83,43 @@ def test_detect_anti_bot_signals() -> None:
     assert "captcha" in detect_anti_bot_signals("<div class='g-recaptcha'></div>")
     assert "status_403" in detect_anti_bot_signals("", 403)
     assert detect_anti_bot_signals("<p>hello</p>", 200) == []
+
+
+def test_captcha_sdk_reference_is_not_a_challenge() -> None:
+    """预加载的验证码 SDK 引用不算拦截(真实 B 站页面即如此)。"""
+    html = '<script src="https://x.com/risk-captcha-sdk/CaptchaLoader.js"></script><p>正文</p>'
+    assert "captcha" not in detect_anti_bot_signals(html, 200)
+    assert "captcha" not in detect_anti_bot_signals("<script>var captcha=1</script>", 200)
+
+
+@pytest.mark.parametrize(
+    "url,platform,kind",
+    [
+        ("https://www.bilibili.com/video/BV1Dvpg6BEt5/", "bilibili", "video"),
+        ("https://b23.tv/abcdef", "bilibili", "video"),
+        ("https://v.douyin.com/iRNBho6/", "douyin", "video"),
+        ("https://www.xiaohongshu.com/explore/123", "xiaohongshu", "video"),
+        ("https://www.kuaishou.com/short-video/xyz", "kuaishou", "video"),
+        ("https://music.163.com/song?id=123", "netease_music", "audio"),
+        ("https://cdn.example.com/a/b.mp4", "generic", "video"),
+        ("https://cdn.example.com/a/b.m3u8", "generic", "video"),
+        ("https://cdn.example.com/a/b.mp3", "generic", "audio"),
+    ],
+)
+def test_detect_media(url: str, platform: str, kind: str) -> None:
+    """媒体识别:平台页面与媒体直链。"""
+    assert detect_media(url) == (platform, kind)
+
+
+def test_detect_media_returns_none_for_normal_pages() -> None:
+    """普通网页不是媒体。"""
+    assert detect_media("https://news.ycombinator.com/") is None
+    assert detect_media("https://example.com/article.html") is None
+
+
+def test_media_urls_route_to_media_channel() -> None:
+    """媒体 URL 走媒体通道,并带上平台标识。"""
+    r = sniff_url("https://www.bilibili.com/video/BV1Dvpg6BEt5/")
+    assert r.channel is Channel.MEDIA
+    assert r.suggested_type == "media"
+    assert r.platform == "bilibili"

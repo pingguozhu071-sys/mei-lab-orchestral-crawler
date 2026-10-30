@@ -89,3 +89,16 @@ def test_route_url_helper(router: LayeredRouter) -> None:
     """URL 快捷入口可用。"""
     d = router.route_url("https://example.com/a.pdf")
     assert d.channel is Channel.PDF
+
+
+def test_media_url_routes_to_media_worker(router: LayeredRouter) -> None:
+    """媒体 URL 派给媒体通道(不进 HTTP/Browser Worker 池)。"""
+    d = router.route(Task(url="https://www.bilibili.com/video/BV1Dvpg6BEt5/"))
+    assert d.worker is WorkerKind.MEDIA
+    assert d.channel is Channel.MEDIA
+
+
+def test_media_task_type_overrides_url(router: LayeredRouter) -> None:
+    """显式声明 MEDIA 任务类型同样走媒体通道。"""
+    d = router.route(Task(url="https://example.com/whatever", task_type=TaskType.MEDIA))
+    assert d.worker is WorkerKind.MEDIA

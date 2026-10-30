@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -35,6 +36,9 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 
 #: 默认最大重试次数,超过则进死信队列。
 DEFAULT_MAX_RETRIES = 3
+
+#: 队列库的 schema 版本(用 PRAGMA user_version 记录,升级时只增不减)。
+SCHEMA_VERSION = 1
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -76,6 +80,30 @@ CREATE TABLE IF NOT EXISTS episodes (
 
 CREATE INDEX IF NOT EXISTS idx_episodes_task ON episodes (task_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_outcome ON episodes (outcome);
+
+CREATE TABLE IF NOT EXISTS media_downloads (
+    id            TEXT PRIMARY KEY,
+    task_id       TEXT,
+    source_url    TEXT NOT NULL,
+    platform      TEXT NOT NULL DEFAULT 'generic',
+    media_id      TEXT NOT NULL DEFAULT '',
+    kind          TEXT NOT NULL DEFAULT 'video',
+    title         TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'pending',
+    method        TEXT NOT NULL DEFAULT '',
+    file_path     TEXT NOT NULL DEFAULT '',
+    file_size     INTEGER NOT NULL DEFAULT 0,
+    progress      REAL NOT NULL DEFAULT 0,
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    error         TEXT NOT NULL DEFAULT '',
+    meta          TEXT NOT NULL DEFAULT '{}',
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    UNIQUE (source_url, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_status ON media_downloads (status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_platform ON media_downloads (platform);
 """
 
 
@@ -108,8 +136,25 @@ class TaskQueue:
     # ------------------------------------------------------------------ 基础
 
     def init_schema(self) -> None:
-        """创建表与索引(幂等)。"""
+        """创建表与索引(幂等),并推进 schema 版本号。"""
         self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """按 ``PRAGMA user_version`` 记录并推进 schema 版本。
+
+        建表语句都是 ``IF NOT EXISTS`` 的幂等形式,迁移只需更新版本号。
+        PRAGMA 不支持参数绑定,所以按版本写死字面量语句(每个版本一行),
+        升级时新增一行分支即可。
+        """
+        row = self._conn.execute("PRAGMA user_version").fetchone()
+        current = int(row[0]) if row else 0
+        if current >= SCHEMA_VERSION:
+            return
+        if SCHEMA_VERSION == 1:
+            self._conn.execute("PRAGMA user_version = 1")
+        else:
+            raise RuntimeError(f"缺少 schema 版本 {SCHEMA_VERSION} 的迁移语句")
 
     def close(self) -> None:
         """关闭底层连接。"""
@@ -217,22 +262,26 @@ class TaskQueue:
         if not targets or limit <= 0:
             return []
         now = time.time()
-        marks = ",".join("?" for _ in targets)
-        rows = self._conn.execute(
-            f"""
-            UPDATE tasks SET status = 'running', updated_at = ?
-            WHERE id IN (
-                SELECT id FROM tasks
-                WHERE status = 'pending' AND url IN ({marks})
-                ORDER BY priority DESC, created_at ASC
-                LIMIT ?
-            )
-            RETURNING id, url, task_type, priority, status, retry_count, depth,
-                      parent_id, payload, created_at, updated_at
-            """,
-            (now, *targets, limit),
-        ).fetchall()
-        return [self._row_to_task(r) for r in rows]
+        collected: list[sqlite3.Row] = []
+        for url in targets:
+            if len(collected) >= limit:
+                break
+            rows = self._conn.execute(
+                """
+                UPDATE tasks SET status = 'running', updated_at = ?
+                WHERE id IN (
+                    SELECT id FROM tasks
+                    WHERE status = 'pending' AND url = ?
+                    ORDER BY priority DESC, created_at ASC
+                    LIMIT 1
+                )
+                RETURNING id, url, task_type, priority, status, retry_count, depth,
+                          parent_id, payload, created_at, updated_at
+                """,
+                (now, url),
+            ).fetchall()
+            collected.extend(rows)
+        return [self._row_to_task(r) for r in collected[:limit]]
 
     # ------------------------------------------------------------ 状态与回写
 
@@ -308,17 +357,16 @@ class TaskQueue:
                 "WHERE status = 'running'",
                 (now,),
             )
-        else:
-            ids = list(worker_ids)
-            if not ids:
-                return 0
-            marks = ",".join("?" for _ in ids)
+            return int(cur.rowcount or 0)
+        total = 0
+        for worker_id in worker_ids:
             cur = self._conn.execute(
-                f"UPDATE tasks SET status = 'pending', worker_id = NULL, updated_at = ? "
-                f"WHERE status = 'running' AND worker_id IN ({marks})",
-                (now, *ids),
+                "UPDATE tasks SET status = 'pending', worker_id = NULL, updated_at = ? "
+                "WHERE status = 'running' AND worker_id = ?",
+                (now, worker_id),
             )
-        return int(cur.rowcount or 0)
+            total += int(cur.rowcount or 0)
+        return total
 
     # ------------------------------------------------------------------ Episode
 
@@ -374,6 +422,122 @@ class TaskQueue:
             d["raw_meta"] = json.loads(d.get("raw_meta") or "{}")
             out.append(d)
         return out
+
+    # ------------------------------------------------------------------ 媒体
+
+    def upsert_media(
+        self,
+        source_url: str,
+        *,
+        task_id: str | None = None,
+        platform: str = "generic",
+        media_id: str = "",
+        kind: str = "video",
+        title: str = "",
+        status: str = "pending",
+        method: str = "",
+        file_path: str = "",
+        file_size: int = 0,
+        progress: float = 0.0,
+        error: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> str:
+        """写入/更新一条媒体下载记录(按 ``source_url + kind`` 幂等)。
+
+        :param source_url: 来源 URL。
+        :return: 记录 ID。
+        """
+        row = self._conn.execute(
+            "SELECT id FROM media_downloads WHERE source_url = ? AND kind = ?",
+            (source_url, kind),
+        ).fetchone()
+        now = time.time()
+        record_id = str(row["id"]) if row is not None else uuid.uuid4().hex
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO media_downloads (
+                id, task_id, source_url, platform, media_id, kind, title, status,
+                method, file_path, file_size, progress, retry_count, error, meta,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record_id, task_id, source_url, platform, media_id, kind, title,
+                status, method, file_path, file_size, progress, 0, error,
+                json.dumps(meta or {}, ensure_ascii=False), now, now,
+            ),
+        )
+        return record_id
+
+    def update_media(self, record_id: str, **fields: Any) -> None:
+        """按字段更新一条媒体记录。
+
+        未出现在 ``fields`` 里的列保持原值(用 ``None`` 作为"不修改"的哨兵,
+        这样可以用一条固定的参数化 SQL 完成,不需要拼接语句)。
+
+        :param record_id: 记录 ID。
+        :param fields: 要更新的字段(``meta`` 传字典会自动转 JSON)。
+        """
+        if not fields:
+            return
+        meta = fields.get("meta")
+        if isinstance(meta, dict):
+            fields = dict(fields)
+            fields["meta"] = json.dumps(meta, ensure_ascii=False)
+        self._conn.execute(
+            """
+            UPDATE media_downloads SET
+                status = COALESCE(?, status),
+                method = COALESCE(?, method),
+                file_path = COALESCE(?, file_path),
+                file_size = COALESCE(?, file_size),
+                progress = COALESCE(?, progress),
+                error = COALESCE(?, error),
+                title = COALESCE(?, title),
+                platform = COALESCE(?, platform),
+                media_id = COALESCE(?, media_id),
+                retry_count = COALESCE(?, retry_count),
+                meta = COALESCE(?, meta),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                fields.get("status"), fields.get("method"), fields.get("file_path"),
+                fields.get("file_size"), fields.get("progress"), fields.get("error"),
+                fields.get("title"), fields.get("platform"), fields.get("media_id"),
+                fields.get("retry_count"), fields.get("meta"),
+                time.time(), record_id,
+            ),
+        )
+
+    def list_media(self, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """列出媒体下载记录。
+
+        :param status: 只看某个状态;``None`` 看全部。
+        :param limit: 最多返回条数。
+        :return: 记录字典列表。
+        """
+        sql = "SELECT * FROM media_downloads"
+        params: list[Any] = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["meta"] = json.loads(item.get("meta") or "{}")
+            out.append(item)
+        return out
+
+    def media_stats(self) -> dict[str, int]:
+        """按状态统计媒体下载记录。"""
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) AS n FROM media_downloads GROUP BY status"
+        ).fetchall()
+        return {str(r["status"]): int(r["n"]) for r in rows}
 
     # ------------------------------------------------------------------ 统计
 
