@@ -25,6 +25,7 @@ from .router.layer import LayeredRouter, WorkerKind
 from .router.sniff import sniff_url
 from .stealth.profiles import DeviceLibrary
 from .storage.export import export as export_records
+from .storage.observability import Observability
 from .storage.vault import Vault
 from .workers.base import WorkerResult
 from .workers.pool import WorkerPool
@@ -133,6 +134,8 @@ class Engine:
         self._pool: WorkerPool | None = None
         # 领取者标识:写进任务的 worker_id,便于定位是谁领的、回收谁的
         self._worker_id = f"engine-{os.getpid()}"
+        # 可观测:事件流 / 进度快照 / 死信
+        self.observability = Observability(self.config.output_dir)
 
     def close(self) -> None:
         """关闭 Worker 池与数据库连接。"""
@@ -547,6 +550,9 @@ class Engine:
             summary.errors.append(f"{url}: {episode.error[:120]}")
             self._finish_task(result.task_id, success=False)
             self.queue.save_episode(episode)
+            self.observability.stats.emit(
+                "task_failed", url=url, reason=episode.error[:200], signals=signals,
+            )
             return
 
         # 提取内容:浏览器通道给的是 html,HTTP 通道给的是原始字节
@@ -642,6 +648,14 @@ class Engine:
         summary.succeeded += 1
         self._finish_task(result.task_id, success=True)
         self.queue.save_episode(episode)
+        self.observability.stats.emit(
+            "task_done", url=url, channel=episode.channel,
+            title=episode.title[:80], bytes=len(episode.content),
+        )
+        self.observability.snapshot(
+            succeeded=summary.succeeded, failed=summary.failed,
+            blocked=summary.blocked, elapsed=round(summary.elapsed, 2),
+        )
 
         # URL 发现:把同域新链接入队(受深度与数量限制)
         self._discover_links(url, body, episode, summary)

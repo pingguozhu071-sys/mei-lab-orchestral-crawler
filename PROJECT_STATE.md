@@ -594,3 +594,36 @@ SimHash: 相同文本距离 0 | 不同文本距离 27
    `src/content/href/data-src/data-original`。
 
 单测:**178 passed**(新增 test_privacy_quality.py 28 条)。
+
+### 阶段 4:可观测与发版门禁
+
+| 交付 | 内容 |
+|---|---|
+| 可观测三件套 | 新增 `meilab/storage/observability.py`:`stats.jsonl`(每任务一条事件流)、`checkpoint.json`(进度快照,临时文件+原子改名)、`deadletter.jsonl`(批量落库失败兜底,防静默丢失);引擎在任务完成/失败时写入 |
+| 发版门禁 6 项 | 新增 `tools/release_check.py`:版本一致性 / Git 工作区干净 / 全量测试 / ruff 静态基线(只降不升) / 依赖漏洞审计(pip-audit)/ 密钥泄漏扫描;**无法得出结论的检查标记「跳过」,不冒充「通过」** |
+| 文档数字同源 | 新增 `tools/doc_numbers.py`:统计模块数/行数/测试数/规则数,生成 README 的 `<!-- AUTO:NUMBERS -->` 块,`--check` 校验文档数字是否过期 |
+
+真实回执:
+
+```
+$ python tools/doc_numbers.py --print
+{ "包内模块数": 32, "包内代码行": 10093, "测试文件数": 10,
+  "测试代码行": 1576, "测试函数数": 123, "站点规则数": 3 }
+
+$ python tools/doc_numbers.py --check
+[OK] 文档里的数字与代码现状一致
+
+$ python tools/release_check.py
+[OK]     版本一致性: 版本一致:0.1.0
+[FAIL]   Git 工作区干净: 有 4 个未提交改动
+[OK]     全量测试: ..................................  [100%]
+[OK]     ruff 静态基线: ruff 错误 0 个(基线 0,只降不升)
+[OK]     依赖漏洞审计: 未发现已知漏洞
+[OK]     密钥泄漏扫描: 未发现疑似密钥
+
+总计 6 项:通过 5 · 失败 1 · 跳过 0
+```
+
+(唯一 FAIL 是"有未提交改动",提交后即通过。)
+
+新增依赖:`pip-audit 2.10.1`(门禁用)。
