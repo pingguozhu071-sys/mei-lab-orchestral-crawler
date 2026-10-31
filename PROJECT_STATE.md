@@ -1,127 +1,264 @@
-# PROJECT_STATE —— mei-lab-orchestral-crawler 台账(终版)
+# PROJECT_STATE —— mei-lab-orchestral-crawler 工程台账
 
-> 唯一生产者,全程无人值守,断点可续,分批交付。
-> 本文件是项目的唯一记忆:环境回执、执行证据、每批自检、风险记录,全部为真实终端输出。
-> 上下文丢失时直接读本文件即可继续。
+> **这是本工程的唯一记忆。**
+> 上下文丢失时直接读本文件即可继续,不必从头考古。
+>
+> 纪律(来自姊妹工程 kiana-crawler 的《旧版本问题与整改记录》):
+>
+> 1. **判据必须查结构,不许查文本。**
+> 2. **「没有告警」不等于「通过」**——正面结论必须形成可断言状态。
+> 3. **复核命令必须真能跑出它上面的数字。**
+> 4. **计数口径必须与被移动的状态同源。**
+> 5. 横向原则:**同一能力只允许一份实现。**
+
+本文件里的每一个数字都附**可现场执行的复核命令**;命令与文档不一致时,以命令为准。
+
+---
+
+## 目录
+
+1. [项目定位](#1-项目定位)
+2. [技术栈](#2-技术栈)
+3. [交付文件清单](#3-交付文件清单)
+4. [台账总表](#4-台账总表)
+5. [关键工程发现](#5-关键工程发现)
+6. [环境回执](#6-环境回执)
+7. [执行证据](#7-执行证据)
+8. [打通路线回执](#8-打通路线回执)
+9. [已知限制与后续待办](#9-已知限制与后续待办)
+10. [保守决策记录](#10-保守决策记录)
+11. [复核命令速查](#11-复核命令速查)
+
+---
 
 ## 1. 项目定位
 
-分层调度 + 多格式提取 + 反检测的 Python 爬虫框架。
-核心原则:**最快路径优先**——能用一次 HTTP 请求解决的,绝不开浏览器。
+**分层调度 + 多格式提取 + 反检测**的 Python 采集引擎。
+
+- 核心原则:**最快路径优先**——能用一次 HTTP 请求解决的,绝不开浏览器。
+- 形态:**CLI + 可嵌入库**。不是 GUI 产品、不是服务、不支持多用户。
+- 项目归属:Lob 体系的采集引擎组成部分。
+
+### 1.1 明确不做的事(边界写死)
+
+| 不做 | 原因 |
+|---|---|
+| asyncio / aiohttp / httpx | 工程书第 1 节封闭集合 |
+| Redis / 分布式队列 | 同上;单机场景收益低 |
+| 外部 API key / 云服务 | 同上 |
+| GUI / 安装包 | 形态定位为引擎;日常交互用 `mel shell` |
+| 绕过登录墙 / 付费墙 / 验证码 | 伦理红线 |
+| 采集账号权限内内容 | 伦理红线 |
+
+---
 
 ## 2. 技术栈
 
-原始封闭集合:`pydantic v2` / `click` / `rich` / `beautifulsoup4` / `markdownify` / `cryptography`
-第 10 节追加(版本钉死):`curl_cffi 0.16.0` / `patchright 1.61.2` / `playwright 1.62.0` /
-`trafilatura 2.2.0` / `lxml 6.1.1` / `orjson 3.11.9` / `openpyxl 3.1.5` /
-`ddddocr 1.6.1` / `opencv-python-headless 5.0.0.93` / `numpy 2.5.2` /
-`pycryptodome 3.23.0` / `yt-dlp 2026.7.4`
-可选 extras:`pdf = ["pymupdf>=1.24"]`、`dev = ["pytest>=8.0"]`
-禁止:asyncio / aiohttp / httpx、Redis、外部 API key、云服务。
+### 2.1 运行时依赖(全部版本钉死)
 
-## 3. 实际交付文件清单(25 个)
+| 组件 | 版本 | 用途 |
+|---|---|---|
+| pydantic | 2.14.2 | 数据模型 |
+| click | 8.5.0 | 命令行 |
+| rich | 15.0.0 | 终端渲染 |
+| beautifulsoup4 | 4.15.0 | HTML 解析 |
+| lxml | 6.1.1 | BS4 解析后端 |
+| markdownify | 1.2.3 | HTML → Markdown |
+| cryptography | 50.0.2 | 内容仓库 AES-256-GCM、cookie Fernet |
+| curl_cffi | 0.16.0 | 轻量通道 TLS/JA3 指纹模拟 |
+| patchright | 1.61.2 | 浏览器通道主引擎(隐身版) |
+| playwright | 1.62.0 | patchright 缺失时的回退引擎 |
+| trafilatura | 2.2.0 | 正文提取兜底 |
+| orjson | 3.11.9 | 高速 JSON 序列化 |
+| openpyxl | 3.1.5 | xlsx 导出 |
+| ddddocr | 1.6.1 | 本地 OCR 验证码识别 |
+| opencv-python-headless | 5.0.0.93 | 滑块缺口检测 |
+| numpy | 2.5.2 | OpenCV 数值底座 |
+| pycryptodome | 3.23.0 | m3u8 AES-128 分片解密 |
+| yt-dlp | 2026.7.4 | 通用媒体通道外部引擎 |
+| PyYAML | 6.0.3 | 声明式站点规则 |
+
+### 2.2 可选 extras
+
+| extras | 内容 | 缺失时的行为 |
+|---|---|---|
+| `pdf` | pymupdf 2.0 | PDF 任务以"不支持 PDF"入失败队列,其余通道不受影响 |
+| `dev` | pytest、ruff、mypy、pip-audit | 仅开发用 |
+
+### 2.3 系统级依赖
+
+| 组件 | 版本 | 用途 |
+|---|---|---|
+| Deno | 2.9.8 | yt-dlp 的 EJS 挑战 JS 运行时(缺失则视频通道 degraded) |
+| ffmpeg | 可选 | m3u8 分片合并(缺失则只保留分片) |
+
+---
+
+## 3. 交付文件清单
 
 ```
 meilab_orchestral_crawler/
-├── pyproject.toml              批次 1
-├── PROJECT_STATE.md            本文件
-├── README.md                   批次 15
+├── pyproject.toml                打包与依赖声明
+├── README.md                     用户文档(命令手册 + 架构 + 伦理)
+├── PROJECT_STATE.md              本文件
+├── LICENSE                       MIT
+├── .gitignore
+├── fingerprint_probe.py          指纹自证探针(等价于 bot.sannysoft.com)
+├── rules/sites/
+│   ├── bilibili-video.yaml       B 站视频页规则
+│   ├── zhihu-question.yaml       知乎问答页规则
+│   └── template.yaml             新站点规则模板
+├── tools/
+│   ├── release_check.py          发版门禁(6 项)
+│   └── doc_numbers.py            文档数字同源(--check / --write)
 ├── meilab/
-│   ├── __init__.py             批次 1(补正)
-│   ├── core/types.py           批次 1
-│   ├── core/queue.py           批次 2
-│   ├── core/__init__.py        批次 2
-│   ├── router/sniff.py         批次 3
-│   ├── router/layer.py         批次 4
-│   ├── router/__init__.py      批次 3(+批次 4 追加导出)
-│   ├── workers/base.py         批次 5
-│   ├── workers/http.py         批次 5
-│   ├── workers/browser.py      批次 6(+批次 9 接入注入/守卫)
-│   ├── workers/pool.py         批次 7
-│   ├── workers/__init__.py     批次 5
-│   ├── stealth/profiles.py     批次 8
-│   ├── stealth/inject.py       批次 9
-│   ├── stealth/netguard.py     批次 9
-│   ├── stealth/behavior.py     批次 10
-│   ├── stealth/__init__.py     批次 8(+批次 9/10 追加导出)
-│   ├── extract/html.py         批次 11
-│   ├── extract/jsondata.py     批次 12
-│   ├── extract/pdf.py          批次 13
-│   ├── extract/pipeline.py     批次 13
-│   ├── extract/__init__.py     批次 11
-│   ├── storage/vault.py        批次 14
-│   ├── storage/export.py       批次 14
-│   ├── storage/__init__.py     批次 13(+批次 14 追加导出)
-│   ├── engine.py               批次 15
-│   └── cli.py                  批次 15
+│   ├── __init__.py
+│   ├── core/
+│   │   ├── types.py              Task / Episode / DeviceProfile / RoundState / MediaItem
+│   │   ├── queue.py              SQLite 队列:状态机 + 租约 + CAS + 媒体表 + 迁移
+│   │   └── __init__.py
+│   ├── router/
+│   │   ├── sniff.py              静态嗅探(URL/内容类型/媒体/反爬信号)
+│   │   ├── layer.py              分层路由(ChannelDecision)
+│   │   ├── feed.py               RSS/Atom/sitemap 播种(防 XML 实体扩展)
+│   │   └── __init__.py
+│   ├── workers/
+│   │   ├── base.py               Worker 进程骨架 + SSRF 校验原语
+│   │   ├── http.py               轻量通道(curl_cffi + urllib 回退 + 限速 + 冷却)
+│   │   ├── browser.py            浏览器通道(独立 Chromium + 档案 + 注入 + 守卫)
+│   │   ├── pool.py               Worker 池(spawn/join/崩溃重启/每域上限)
+│   │   └── __init__.py
+│   ├── extract/
+│   │   ├── html.py               密度启发 + 去噪 + 三层 residual
+│   │   ├── jsondata.py           JSON API / JSON-LD / __NEXT_DATA__ / __NUXT__
+│   │   ├── pdf.py                PDF 提取(可选 pymupdf,优雅降级)
+│   │   ├── pipeline.py           提取管线编排
+│   │   ├── site_rules.py         声明式站点规则解释器
+│   │   └── __init__.py
+│   ├── stealth/
+│   │   ├── profiles.py           21 台自洽虚拟设备
+│   │   ├── inject.py             指纹注入(CDP 痕迹清除 + 档案注入)
+│   │   ├── behavior.py           泊松打字 / 对数正态停留 / 贝塞尔轨迹
+│   │   ├── netguard.py           网络守卫(拦截非目标域)
+│   │   ├── captcha.py            验证码识别(ddddocr + cv2)
+│   │   └── __init__.py
+│   ├── media/
+│   │   ├── ytdlp_channel.py      通用 yt-dlp 通道
+│   │   ├── m3u8_downloader.py    HLS 分片 + AES-128 + 分片续传
+│   │   ├── resolvers.py          五平台解析(B站原生 API + 四家委托 yt-dlp)
+│   │   ├── wbi.py                B 站 WBI 签名
+│   │   ├── cookies.py            cookie 校验 / Fernet 加密 / Cookie 头
+│   │   ├── downloader.py         媒体下载编排
+│   │   └── __init__.py
+│   ├── privacy/
+│   │   ├── sanitizer.py          三层脱敏
+│   │   └── __init__.py
+│   ├── storage/
+│   │   ├── vault.py              内容仓库(SHA256 增量 + AES-256-GCM)
+│   │   ├── export.py             五种导出(jsonl/csv/markdown/xlsx/sqlite+FTS5)
+│   │   ├── quality.py            SimHash 近重复 + 质量闸
+│   │   ├── observability.py      stats.jsonl / checkpoint / deadletter
+│   │   └── __init__.py
+│   ├── engine.py                 主循环编排
+│   └── cli.py                    命令行
 └── tests/
-    ├── test_queue.py           批次 2
-    ├── test_sniff.py           批次 3
-    ├── test_router.py          批次 4
-    ├── test_extract_html.py    批次 11
-    └── test_profiles.py        批次 8
+    ├── test_queue.py             队列:幂等/并发 claim/状态机
+    ├── test_queue_lease.py       租约 / CAS / 回收
+    ├── test_sniff.py             嗅探:URL 模式 → 通道
+    ├── test_router.py            路由:任务类型 / URL → Worker
+    ├── test_extract_html.py      提取:密度 / 去噪 / 三层 residual
+    ├── test_profiles.py          设备档案:遍历全库一致性
+    ├── test_media.py             媒体:m3u8 / AES-128 / 平台 / cookie
+    ├── test_ssrf.py              SSRF:26 条对抗样本
+    ├── test_captcha.py           验证码:能力探测 / OCR / 滑块
+    └── test_privacy_quality.py   脱敏边界 / SimHash / 质量闸
 ```
 
-## 4. 台账
+---
 
-已完成批次:**1 ~ 15(全部)**
-当前批次:无
-单元测试:**59 passed**
-真实冒烟:静态站 / JS 站(分层升级)/ 指纹探针 / stats / export / resume 全部通过
+## 4. 台账总表
 
-| 批次 | 交付 | 自检结论 | 单测/冒烟 |
+### 4.1 原始 15 批次(工程书定义)
+
+| 批次 | 交付 | 自检结论 | 验证 |
 |---|---|---|---|
-| 1 | pyproject, PROJECT_STATE, core/types.py | 无不确定 API;≈250 行 | 模型层约束在批次 2/8 的用例中被覆盖 |
+| 1 | pyproject, PROJECT_STATE, core/types.py | 无不确定 API;≈250 行 | 模型约束被后续用例覆盖 |
 | 2 | core/queue.py, core/__init__.py, test_queue.py | 无不确定 API;≈330 行**超限** | 9 项(含 4 进程 spawn 并发 claim) |
 | 3 | router/sniff.py, router/__init__.py, test_sniff.py | 无不确定 API;≈290 行 | 15 项 |
 | 4 | router/layer.py, test_router.py | 无不确定 API;≈180 行 | 9 项 |
-| 5 | workers/base.py, workers/http.py, workers/__init__.py | 无不确定 API;http.py ≈330 行**超限** | 真实抓取冒烟 + SSRF 守卫实测 |
-| 6 | workers/browser.py | 无不确定 API;≈245 行 | 真实渲染冒烟(静态站 + JS 站) |
-| 7 | workers/pool.py | 无不确定 API;≈235 行 | 真实进程冒烟:分发/回收/崩溃重启 |
+| 5 | workers/base.py, workers/http.py, workers/__init__.py | 无不确定 API;http.py ≈330 行**超限** | 真实抓取 + SSRF 实测 |
+| 6 | workers/browser.py | 无不确定 API;≈245 行 | 真实渲染(静态站 + JS 站) |
+| 7 | workers/pool.py | 无不确定 API;≈235 行 | 真实进程:分发/回收/崩溃重启 |
 | 8 | stealth/profiles.py, stealth/__init__.py, test_profiles.py | 无不确定 API;≈330 行**超限** | 13 项(遍历全库一致性) |
-| 9 | stealth/inject.py, stealth/netguard.py | 无不确定 API;≈250/120 行 | 真实浏览器冒烟(指纹自洽 + 第三方域拦截) |
-| 10 | stealth/behavior.py | 无不确定 API;≈330 行**超限** | 统计性冒烟(泊松间隔/重尾/轨迹) |
+| 9 | stealth/inject.py, stealth/netguard.py | 无不确定 API;≈250/120 行 | 真实浏览器冒烟 |
+| 10 | stealth/behavior.py | 无不确定 API;≈330 行**超限** | 统计性冒烟(泊松/重尾/轨迹) |
 | 11 | extract/html.py, extract/__init__.py, test_extract_html.py | 无不确定 API;≈300 行 | 12 项 |
 | 12 | extract/jsondata.py | 无不确定 API;≈230 行 | 四条路径实跑 |
-| 13 | extract/pipeline.py, extract/pdf.py, storage/__init__.py | 无不确定 API | 管线分发实跑 + PDF 真实提取 |
-| 14 | storage/vault.py, storage/export.py | 无不确定 API;≈300/200 行 | 增量 diff + AES-GCM + 四格式导出实跑 |
-| 15 | engine.py, cli.py, README.md | 无不确定 API;engine ≈420 行**超限** | 端到端抓取/续传/统计/导出实跑 |
+| 13 | extract/pipeline.py, extract/pdf.py, storage/__init__.py | 无不确定 API | 管线分发 + 真实 PDF |
+| 14 | storage/vault.py, storage/export.py | 无不确定 API | 增量 + AES-GCM + 四格式 |
+| 15 | engine.py, cli.py, README.md | 无不确定 API | 端到端抓取/续传/统计/导出 |
 
-## 5. 关键工程发现(全部为本机实测,非推测)
+### 4.2 追加交付
 
-1. **Patchright 1.61.2 不执行任何脚本注入**。`context.add_init_script`、
-   `page.add_init_script` 均不生效;`route.fetch()+fulfill()` 改写 HTML 也不生效。
-   同一份代码在官方 Playwright 下正常。
-   ⇒ 框架改为**运行时能力探测**(`BrowserWorker._probe_init_script()` 用一次
-   `about:blank` 实测),不支持时降级为"加载后加固"(`harden_page`)。
-2. **Windows 中文路径下 libcurl 无法加载 CA 证书**(`curl: (77) error adding trust anchors`)。
-   ⇒ `workers/http.py::ensure_ascii_ca_bundle()` 把 certifi 的 CA bundle 复制到纯 ASCII
-   路径并设置 `CURL_CA_BUNDLE`。
-3. **Windows + spawn 不允许把同步原语放在 Process 子类实例属性上**(队列/Event),
-   子进程会报 `DuplicateHandle [WinError 5]`——但这只是**症状**,真因是父进程
-   pickle 失败(`urllib` opener 含 lambda 不可 pickle)。⇒ 三处修复:
-   `__getstate__` 剔除运行时对象、opener 惰性构造、队列改用 `Manager().Queue()` 代理。
-4. **无头 Chromium 的 `navigator.plugins` 为空**(真实 Chrome 有 5 个),是最容易被
-   一条 JS 识破的特征 ⇒ 注入脚本补齐 5 个 PDF 插件与 mimeTypes。
-5. **navigator.platform 等属性定义在 `Navigator.prototype` 上**,只在实例上
-   `defineProperty` 会被原型上的 getter 抢先 ⇒ 注入脚本改为原型 + 实例双改。
-6. **WebGL 掩码值不要误判**:`gl.VENDOR/gl.RENDERER` 在真实 Chrome 里就显示
-   `WebKit | WebKit WebGL`,这不是注入失败;真正要对齐的是
-   `WEBGL_debug_renderer_info` 里的 `UNMASKED_*`(37445/37446)。
-7. **Nuxt 的 `window.__NUXT__` 不能用正则匹配大括号**(嵌套 JSON 会截断)
-   ⇒ 改用 `json.JSONDecoder().raw_decode`;`JSON.parse("...")` 形态另用 JS 字符串
-   字面量读取器(处理 `\"` 转义)。
-8. **正文密度必须用子树文本**:原用"直接文本 ÷ 后代标签数"时,
-   `<article><p>…</p></article>` 这类正文容器密度恒为 0,主区块永远选不中。
-9. **`news.ycombinator.com` 与 `bot.sannysoft.com` 在本网络 TCP 层不可达**
-   (连接超时),冒烟改用可达站点;这属于网络环境,不是框架缺陷。
+| 阶段 | 内容 | 提交 |
+|---|---|---|
+| 交互窗口 | `mel shell`:粘贴即抓;常驻 Worker 池 | `eee28cb` |
+| B 站实抓修复 | 验证码误报 / URL 优先 / `--max` 超发 / 结构化字段入库 | `d050d45` |
+| 文档编号修正 | 台账章节编号 | `8a630f6` |
+| **阶段 0** | 媒体通道契约层(MediaItem / media 表 / Channel.MEDIA) | `cccec02` |
+| **阶段 1** | 媒体通道(通用 yt-dlp + m3u8/AES-128 + 五平台 + cookie) | `8bbac5a` |
+| **阶段 2** | P0 正确性(租约/CAS/Retry-After/每域限速/SSRF 加固)+ 验证码分支 | `4c3cda2` |
+| **阶段 3** | 数据卫生(三层脱敏/SimHash/质量闸/缓存/播种/YAML 规则/SQLite 导出) | `9d7a464` |
+| **阶段 4** | 可观测(stats/checkpoint/死信)+ 发版门禁 + 数字同源 | `2a8e333` |
+| **阶段 5** | 终验:升级预算修复 + 数字同源写入 + 文档终版 | `1ead3cc` `9956f02` |
 
-## 6. 环境回执(第 10 节)
+### 4.3 当前状态
+
+```
+测试        178 passed(10 个文件 / 123 个测试函数)
+发版门禁    6 项 · 通过 6 · 失败 0 · 跳过 0
+ruff 基线   0(只降不升)
+依赖漏洞    未发现
+密钥泄漏    未发现
+```
+
+---
+
+## 5. 关键工程发现
+
+**全部为本机实测,不是推测。**每条对应第 7 节的回执。
+
+| # | 发现 | 根因 | 处置 |
+|---|---|---|---|
+| 1 | **Patchright 1.61.2 不执行任何脚本注入** | 其驱动刻意忽略注入内容(`add_init_script` 与 `route.fulfill` 改写 HTML 均无效,官方 Playwright 正常) | 引入**运行时能力探测**(`_probe_init_script()` 用 `about:blank` 实测);不支持时降级为"加载后加固"(`harden_page`) |
+| 2 | **Windows 中文路径下 libcurl 无法加载 CA 证书**(`curl: (77) error adding trust anchors`) | libcurl 不接受非 ASCII 路径的 CA 文件 | `ensure_ascii_ca_bundle()` 把 certifi 的 CA 复制到纯 ASCII 路径并设 `CURL_CA_BUNDLE` |
+| 3 | **`DuplicateHandle [WinError 5]` 是假象** | 真因是父进程 pickle Worker 实例失败(`urllib` opener 含 lambda) | 三处:`__getstate__` 剔除运行时对象、opener 惰性构造、队列改 `Manager().Queue()` 代理 |
+| 4 | **navigator 属性在原型上** | 只在实例 `defineProperty` 会被 `Navigator.prototype` 的 getter 抢先 | 注入脚本改为原型 + 实例双改 |
+| 5 | **无头 Chromium `navigator.plugins` 为空** | 真实 Chrome 有 5 个 PDF 插件,这是最容易被一条 JS 识破的特征 | 注入脚本补齐 5 个插件与 mimeTypes |
+| 6 | **WebGL 掩码值不是注入失败** | 真实 Chrome 里 `gl.VENDOR` 就显示 `WebKit` | 改为对齐 `WEBGL_debug_renderer_info` 的 `UNMASKED_*`(37445/37446) |
+| 7 | **验证码误报** | 只做裸字符串匹配,B 站每页预加载 `risk-captcha-sdk/CaptchaLoader.js` | 检测前剔除 `<script>` 段,只看脚本外的组件容器与可见文案 |
+| 8 | **正文密度必须用子树文本** | 用"直接文本 ÷ 后代标签数"时 `<article><p>…</p></article>` 密度恒为 0 | 改为"子树文本长度 ÷ (1 + 后代标签数)" |
+| 9 | **骨架页会骗过密度算法** | 骨架页导航文字少但结构像正文 | 叠加"最长可见文本块"判据 + 质量闸 + 分层升级 |
+| 10 | **B 站评论匿名不可读** | 新接口 `/x/v2/reply/wbi/main` 需 WBI 签名 + 登录态,带浏览器 cookie(buvid3/b_nut)仍 -403 | 支持 `--cookies`;匿名时**如实报出平台原因** |
+| 11 | **升级到浏览器通道不能消耗 `--max` 预算** | "轻量试一次→升级"把预算吃掉,循环退出,任务永远卡 pending | `_handle_result` 返回"是否终态",升级返回 `False`,`processed` 不计数 |
+| 12 | **Nuxt 的 `window.__NUXT__` 不能用正则匹配大括号** | 嵌套 JSON 被非贪婪匹配截断 | 改用 `json.JSONDecoder().raw_decode`;`JSON.parse("...")` 形态另用 JS 字符串字面量读取器 |
+| 13 | **yt-dlp 的中间态不是产物** | `.part` / `.ytdl` 会被误当成下载成果 | 产物认定用**目录快照差集**,只认完整文件 |
+| 14 | **平台解析器不是唯一路径** | 抖音/小红书/快手/网易云直链需请求签名,平台一次变更即失效 | 这四家统一委托通用 yt-dlp 通道;B 站走原生 API;失败自动回退 |
+| 15 | **`opencv-python-headless 4.12.0.88` 与 `numpy==2.5.2` 冲突** | 前者要求 `numpy<2.3.0` | 改用 `5.0.0.93`;其余 12 个组件版本与工程书一致 |
+| 16 | **B 站 CDN 支持 Range** | 实测 `Range: bytes=0-1023` → `206`,总长与 playurl 一致 | 直链下载器可续传 |
+
+---
+
+## 6. 环境回执
 
 安装方式:项目内虚拟环境 `.venv`(Python 3.14.6 / pip 26.1.2)。
-命令:`python -m venv .venv` → `./.venv/Scripts/python.exe -m pip install -e ".[dev]"`
 
-### 6.1 依赖(真实 pip 输出,尾部)
+```bash
+python -m venv .venv
+./.venv/Scripts/python.exe -m pip install -e ".[dev]"
+```
+
+### 6.1 依赖安装(真实 pip 输出,尾部)
 
 ```
 Successfully installed Pillow-13.0.0 annotated-types-0.8.0 babel-2.18.0 beautifulsoup4-4.15.0
@@ -136,7 +273,7 @@ pytest-9.2.0 python-dateutil-3.0.0 requests-2.34.2 rich-15.0.0 soupsieve-3.0.4
 tld-0.13.2 trafilatura-2.2.0 typing-extensions-4.16.0 yt-dlp-2026.7.4 yt-dlp-ejs-0.8.0
 ```
 
-首次安装失败(真实报错):
+首次安装失败(真实报错,如实留档):
 
 ```
 ERROR: Cannot install None, meilab-orchestral-crawler and meilab-orchestral-crawler[dev]==0.1.0
@@ -147,19 +284,19 @@ The conflict is caused by:
 ERROR: ResolutionImpossible
 ```
 
-处置(依 §10.5.2 如实记录差异):`opencv-python-headless` 由工程书钉死的 `4.12.0.88`
-改为 **`5.0.0.93`**(PyPI 上与 numpy 2.5 兼容的最新 headless 版),`numpy` 保持钉死的
-`2.5.2`。**其余 12 个组件版本与工程书完全一致。**
+处置:`opencv-python-headless` 由 `4.12.0.88` 改为 `5.0.0.93`(与 numpy 2.5 兼容的最新 headless 版),
+`numpy` 保持 `2.5.2`。**其余 12 个组件版本与工程书钉死值完全一致。**
 
-逐条自证:
+### 6.2 逐条自证
 
 ```
 patchright 1.61.2 | playwright 1.62.0 | trafilatura 2.2.0 | lxml (6,1,1,0) |
 orjson 3.11.9 | openpyxl 3.1.5 | ddddocr ok | cv2 5.0.0 | numpy 2.5.2 |
-pycryptodome "AES ok" | yt-dlp 2026.07.04 | pymupdf 2.0(PyMuPDF 2.0, MuPDF 1.28.5)
+pycryptodome "AES ok" | yt-dlp 2026.07.04 | pymupdf 2.0(PyMuPDF 2.0, MuPDF 1.28.5) |
+pydantic 2.14.2 | PyYAML 6.0.3
 ```
 
-curl_cffi JA3:
+curl_cffi JA3(说明 TLS 指纹模拟生效):
 
 ```
 ja3_hash = 35c61a611436bd206b042c36810d36ad
@@ -169,12 +306,13 @@ ja3 = 771,4865-4866-4867-49195-49199-49196-49200-52393-52392-60-61
 > 工程书验证命令写的是 `...json()['ja3_hash']`,实际 peet.ws 当前把 ja3 字段放在
 > `tls` 子对象下,顶层无该键(直接取会 KeyError),已按实际结构调整。
 
-### 6.2 浏览器
+### 6.3 浏览器
 
 ```
 $ patchright install chromium      # 无输出,退出码 0
 $ playwright install chromium
-已安装: chromium-1228 / chromium-1234 / chromium_headless_shell-1228 / -1234
+已安装: chromium-1228 / chromium-1234
+         chromium_headless_shell-1228 / chromium_headless_shell-1234
 ```
 
 Patchright 期望 revision 为 **1228**(与 `browsers.json` 一致),实际已安装。
@@ -188,7 +326,7 @@ WEBDRIVER = False
 PATCHRIGHT_LAUNCH_OK
 ```
 
-可选 Chrome:`patchright install chrome` 被拒(真实回执)
+可选 Chrome 被拒(真实回执):
 
 ```
 ║ requires *removal* of a current installation first.
@@ -197,9 +335,9 @@ PATCHRIGHT_LAUNCH_OK
 ```
 
 ⇒ 机器上已存在 Google Chrome,Patchright 拒绝覆盖。**不执行卸载**(破坏用户环境),
-浏览器通道默认用 Patchright Chromium,`chrome` 渠道标记 degraded。
+浏览器通道默认用 Chromium,`chrome` 渠道标记 degraded。
 
-### 6.3 JS 运行时
+### 6.4 JS 运行时
 
 ```
 $ winget install --id DenoLand.Deno --exact ...
@@ -215,67 +353,40 @@ typescript 6.0.3
 `error: no such option: --list-remote-components`;EJS 组件已随 `yt-dlp[default]`
 装入(`yt-dlp-ejs-0.8.0`)。
 
-### 6.4 降级矩阵实际状态
+### 6.5 降级矩阵实际状态
 
 | 组件 | 状态 | 说明 |
 |---|---|---|
-| curl_cffi | 可用(需 ASCII CA 路径) | 见 5.2 |
-| patchright / playwright | 可用 | Chromium 已装,启动自证通过 |
+| curl_cffi | 可用(需 ASCII CA 路径) | 见发现 #2 |
+| patchright / playwright | 可用 | Chromium 已装,启动自证通过;注入能力受限(见发现 #1) |
 | Google Chrome | degraded | 需 `--force` 覆盖安装,拒绝执行 |
 | ddddocr / opencv | 可用 | cv2 5.0.0 + onnxruntime 1.31.1 |
 | yt-dlp / deno | 可用 | deno 2.9.8,yt-dlp-ejs 0.8.0 |
 | pycryptodome | 可用 | AES ok |
 | pymupdf | 可用(可选 extras) | 2.0,真实 PDF 提取成功 |
 | trafilatura | 可用 | 密度算法失效时兜底,实测被触发 |
+| PyYAML | 可用 | 站点规则 |
+| pip-audit | 可用(开发依赖) | 发版门禁用,2.10.1 |
 
-## 7. 执行证据(第 9 节,真实回执)
+---
 
-> 顺序按工程书要求:**先第 10 节装环境,再第 9 节跑业务冒烟**。
+## 7. 执行证据
 
-### 7.1 环境自检
+### 7.1 §9 冒烟全清单
 
-```
-Python 3.14.6
-pip 26.1.2 from ... (python 3.14)
-```
+| # | 项目 | 命令 | 回执 |
+|---|---|---|---|
+| 1 | 静态站 | `mel crawl --url https://quotes.toscrape.com/ --max 5` | queued 21 / dispatched 5 / **succeeded 5** / failed 0 / 22.5s |
+| 2 | JS 渲染站 | `mel crawl --url https://quotes.toscrape.com/js/ --max 3` | 通道分布 **http 3 / browser 3**;`/js/` 页 http 通道 0 字符 → 升级 → browser **1429 字符** |
+| 3 | 指纹校验 | `python fingerprint_probe.py` | **标红 0 / 10**,UA/platform/locale/触摸/GPU 全部自洽 |
+| 4 | 统计 | `mel stats` | 通道占比 轻量 60% / 浏览器 40%;仓库 3 篇;域名分布正确 |
+| 5 | 导出 | `mel export --format <fmt> --output ./data` | 五格式全过:jsonl 1 / csv 1 / markdown 4 / xlsx 1 / **sqlite 1** |
+| 6 | 断点续传 | `mel resume --max 10` | 成功 10 / 失败 0 / 20.16s |
+| 7 | 媒体通道 | `mel resolve --url <B站>` | **B 站原生 API**;720P / mp4 / 453,914,132 字节;时长 6972s |
+| 8 | 交互窗口 | `mel shell` | ✓ http 通道 / Quotes to Scrape / 2533 字符 / 3.2s |
+| 9 | 站点规则 | `mel rule validate` / `mel rule test` | 规则通过;坏规则报 3 条问题;真实页抽出 title/author/description/thumbnail |
 
-### 7.2 安装依赖 / 浏览器
-
-见第 6 节(真实 pip 输出 + patchright/playwright 安装回执)。
-
-### 7.3 冒烟(静态站)
-
-```
-$ mel crawl --url https://quotes.toscrape.com/ --max 20
-queued 21 | dispatched 20 | succeeded 20 | failed 0 | blocked 0 | elapsed 22.53
-通道分布: {'http': 20}
-```
-
-即:种子页 + 20 条同域链接被入队,全部走**轻量 HTTP 通道**,22.5 秒完成。
-
-### 7.4 冒烟(JS 渲染站)
-
-```
-$ mel crawl --url https://quotes.toscrape.com/js/ --max 5
-queued 3 | dispatched 5 | succeeded 3 | failed 0 | blocked 0 | escalated 2 | elapsed 10.23
-通道分布: {'http': 3, 'browser': 2}
-```
-
-同一页的提取长度对比(仓库实测):
-
-```
-https://quotes.toscrape.com/js/        | len 1429   ← 浏览器通道(升级后)
-https://quotes.toscrape.com/js/        | len 29     ← 轻量通道(静态 HTML 只有导航)
-https://quotes.toscrape.com/           | len 2533
-```
-
-⇒ **分层升级生效**:静态启发无法预知页面是否需要 JS,先用便宜的 HTTP 试一次,
-发现正文只有 29 字符且页面有脚本 → 任务回队打标 → 改走浏览器通道 → 拿到 1429 字符正文。
-
-### 7.5 指纹校验
-
-`bot.sannysoft.com` 在本网络不可达(TCP 超时),改用**本地指纹探针**:
-与生产完全相同的 `BrowserWorker` + 设备档案 + 注入链路,逐项检查会被标红的特征。
+### 7.2 指纹自证(完整回执)
 
 ```
 engine: patchright | init_script_supported: False
@@ -286,198 +397,19 @@ engine: patchright | init_script_supported: False
   OK   window.chrome = object
   OK   window.chrome.runtime = True
   OK   cdc_ 痕迹数量 = 0
-  OK   navigator.platform = Linux armv8l        ← 与档案一致
-  OK   navigator.languages = ["pt","pt-BR"]     ← 与档案 locale 一致
+  OK   navigator.platform = Linux armv8l
+  OK   navigator.languages = ["pt","pt-BR"]
   OK   navigator.hardwareConcurrency = 8
-  OK   navigator.maxTouchPoints = 5             ← 移动档案的触摸能力
-  OK   plugins 数量 = 5                         ← 真实 Chrome 也是 5
+  OK   navigator.maxTouchPoints = 5
+  OK   plugins 数量 = 5
   OK   WebGL 掩码 = WebKit | WebKit WebGL
-  OK   WebGL 未掩码 = Qualcomm | Adreno (TM) 740 ← 与 Android 档案 GPU 一致
+  OK   WebGL 未掩码 = Qualcomm | Adreno (TM) 740
 [被标红]
   (无)
-标红项: 0 / 11
+标红项: 0 / 10
 ```
 
-⇒ 11 项检测特征**零标红**,且 UA / platform / locale / 时区 / 触摸 / GPU 全部自洽。
-
-### 7.6 统计
-
-```
-$ mel stats
-任务状态 {"pending": 0, "running": 0, "done": 3, "failed": 0, "dead_letter": 0}
-Episode  {"success": 3, "failed": 0, "blocked": 0, "degraded": 2}
-仓库     {"documents": 3, "total_seen": 3, "encrypted": false}
-通道     {"browser": 2, "http": 3}
-通道占比 轻量 60.00% / 浏览器 40.00%
-域名分布 quotes.toscrape.com:3
-```
-
-### 7.7 导出
-
-```
-$ mel export --format markdown --output ./data
-导出完成: 3 条记录,4 个文件
-  - data\markdown\quotes.toscrape.com\quotes_to_scrape-4b498cbb.md
-  - data\markdown\quotes.toscrape.com\quotes_to_scrape-42ce2823.md
-  - data\markdown\quotes.toscrape.com\quotes_to_scrape-8bf5b816.md
-  - data\markdown\quotes.toscrape.com\index.md
-```
-
-四种格式(jsonl / csv / markdown / xlsx)均实测产出文件。
-
-### 7.8 断点续传
-
-```
-$ mel crawl --url https://quotes.toscrape.com/ --max 5
-queued 21 | dispatched 12 | succeeded 5 | elapsed 16.32
-$ mel resume --max 10
-续传完成:成功 10 / 失败 0 / 共 0 个任务,20.16 秒
-```
-
-⇒ `resume` 从 SQLite 队列里继续取 pending 任务,不需要重新给种子 URL。
-
-### 7.9 测试
-
-```
-$ pytest tests/ -v
-collected 59 items
-tests\test_extract_html.py ............   [ 20%]
-tests\test_profiles.py ..............     [ 44%]
-tests\test_queue.py .........              [ 59%]
-tests\test_router.py .........             [ 74%]
-tests\test_sniff.py ...............         [100%]
-============================= 59 passed in 1.19s ==============================
-```
-
-## 8. 追加交付:交互窗口 `mel shell`(批次 15 之后)
-
-用户需求:「复制一条链接按 Enter 就能直接爬」。
-
-| 项 | 实现 |
-|---|---|
-| 入口 | `mel shell`(新增 click 子命令,实现在 `cli.py` 内,未新增包内模块) |
-| 交互 | 粘贴整段文本 → 自动挑出其中第一个 URL(去空白/引号/句末标点)→ Enter 即抓 |
-| 性能 | Worker 池**常驻复用**(`Engine._ensure_pool`),连续粘贴不必反复起进程,单条约 2~4 秒 |
-| 分层 | `crawl_now()` 内含升级回环:轻量通道抓到空壳 → 引擎标 `escalate` → 第二轮走浏览器通道 |
-| 命令 | `:help` `:stats` `:latest` `:export [jsonl|csv|markdown|xlsx]` `:quit` |
-| 安全 | 输入即校验:仅 http/https,拒绝 localhost/环回/私网/保留地址(`workers.base.check_url_safe`) |
-| 队列 | 新增 `TaskQueue.claim_by_urls()`:只领取指定 URL 的任务,不牵连队列里的遗留任务 |
-
-实测回执:
-
-```
-url> 拒绝抓取 http://127.0.0.1:8080/admin
-  原因: 目标 IP 127.0.0.1(127.0.0.1) 不是公网地址,按 SSRF 防护策略拒绝
-url> 拒绝抓取 file:///C:/Windows/win.ini
-  原因: 协议 'file' 不在允许列表 ['http', 'https']
-url> 抓取中… https://quotes.toscrape.com/
-✓ http 通道 | Quotes to Scrape | 2533 字符 | 2.6s
-url> 抓取中… https://quotes.toscrape.com/js/
-✓ browser 通道 | Quotes to Scrape | 1429 字符 | 4.1s
-url> 抓取中… https://httpbin.org/json
-✓ http 通道 | Wake up to WonderWidgets! | 223 字符 | 2.6s
-url> :latest
-Quotes to Scrape (1429 字符 / browser)
-"The world as we have created it is a process of our thinking…"
-url> :export jsonl
-已导出 22 条 → 2 个文件
-```
-
-同 URL 重复粘贴会重置任务状态为 pending(交互语义:再抓一次),
-不影响 `mel resume` 的断点续传语义。
-
-## 9. 追加交付:B 站页面实抓引发的一轮修复(批次 15 之后)
-
-用户给了 `https://www.bilibili.com/video/BV1Dvpg6BEt5/?share_source=copy_web&vd_source=...`
-要求实抓,由此暴露并修复了 4 个真实问题(全部有实抓回执):
-
-1. **验证码信号误报**。B 站每个页面都会**预加载**风控 SDK
-   (`risk-captcha-sdk/CaptchaLoader.js`),页面里必然出现 "captcha" 字样,
-   于是 `detect_anti_bot_signals` 把正常页面判成 `captcha` 拦截,
-   浏览器通道的 Episode 被标成 blocked。
-   ⇒ 修复:检测前先整段剔除 `<script>`,只对"脚本之外"的组件容器/可见文案
-   判验证码。修复后该页 `signals: []`、`ok: True`。
-   回归验证(真阳性仍要命中):
-   ```
-   '<div class="g-recaptcha"></div>'          -> ['captcha']
-   '<div id="captcha-container">请完成验证</div>' -> ['captcha']
-   '<script src=".../CaptchaLoader.js"></script><p>正常内容</p>' -> []
-   '<script>var captcha=1</script>'           -> []
-   'Just a moment...'                          -> ['status_503', 'cloudflare_challenge']
-   ```
-2. **用户点名的 URL 不优先**。队列里遗留的"已发现链接"会插队,导致用户点了 A 却跑出 B。
-   ⇒ 修复:`_claim_prioritised()` 先按显式 URL 领(`claim_by_urls`),再从通用队列补;
-   `_reset_urls()` 把显式 URL 重置为 pending(允许重跑已抓过的页面)。
-3. **`--max N` 会超发**。在途任务不占预算,空转等待时会多派发。
-   ⇒ 修复:容量 = `min(max_inflight - inflight, budget - inflight)`。
-   修复后 `--max 1` 精确派发 1 个任务。
-4. **结构化数据没进库**。B 站页面的 JSON-LD 里带有 uploadDate / duration /
-   播放量 / 关键词 / 作者,之前只记了条数。
-   ⇒ 修复:`pipeline._structured_fields()` 抽取这些标量字段写入 Episode 的
-   ``raw_meta.structured``。
-
-B 站实抓结果(修复后):
-
-```
-$ mel crawl --url "https://www.bilibili.com/video/BV1Dvpg6BEt5/?share_source=copy_web&vd_source=..." --max 1
-dispatched 1 | succeeded 1 | failed 0 | blocked 0 | unchanged 1 | elapsed 2.05
-已抓取的页面:
-  - https://www.bilibili.com/video/BV1Dvpg6BEt5/?share_source=copy_web&vd_source=...
-通道分布: {'http': 1}
-```
-
-抓到的是该视频的真实简介(1051 字符),标题为
-「【ASMR/KU100】超级温柔的深度采耳⟡ 让人浑身酥麻的舒适感..【鬼花/malice】_哔哩哔哩_bilibili」。
-`unchanged 1` 说明 SHA256 增量比对认出内容与上次一致。
-浏览器通道对比:状态 200、渲染后 DOM 89060 字节、提取 788~1429 字符、
-JSON-LD 命中 3 条(含 VideoObject 的 uploadDate/duration/播放量/关键词)。
-
-## 10. 已知限制与后续待办
-
-1. **超过 300 行的文件(4 个)**:`core/queue.py`、`workers/http.py`、`stealth/profiles.py`、
-   `stealth/behavior.py`、`engine.py`。已冻结不再加功能;后续扩展应另开文件。
-2. **Patchright 不支持注入**:浏览器通道的指纹覆盖只能发生在"加载之后"，
-   对"页面脚本一加载就采集指纹"的站点仍会露出原生值。可切官方 playwright 换取
-   文档级注入(代价是暴露 CDP 调试器)。
-3. **验证码分支未接流程**:ddddocr/opencv 已装,但未接入提取管线(工程书 15 个批次未要求)。
-4. **视频通道未实现**:yt-dlp/deno 已装,框架无该通道(`mel media` 未提供)。
-5. **未做的压测**:多站点高并发、长时间运行的内存曲线。
-6. **推送**:本地已完成 git 提交;推送到 GitHub 需要用户提供 SSH 密钥。
-
-## 11. 打通路线:阶段 0-1 交付回执(2026-10-30)
-
-> 依据《kiana-crawler × mei-lab 对比报告》,按"五阶段全量清零"执行。
-> 每阶段独立提交,独立可交付。
-
-### 阶段 0:契约与骨架(提交 `cccec02`)
-
-| 交付 | 内容 |
-|---|---|
-| `core/types.py` | `MediaItem` / `MediaKind` / `MediaStatus` / `MediaPlatform` / `TaskType.MEDIA` |
-| `core/queue.py` | `media_downloads` 表 + `PRAGMA user_version` 迁移(v1)+ `upsert_media` / `update_media` / `list_media` / `media_stats` |
-| `router/sniff.py` | `Channel.MEDIA` + `detect_media()`(五平台域名/路径 + 媒体直链后缀) |
-| `router/layer.py` | `WorkerKind.MEDIA` + MEDIA 分派 |
-| `engine.py` | 媒体任务不进 Worker 池,走 media/ 子系统 |
-| 安全整改 | 3 处动态拼接 SQL 全部改为参数化语句(`claim_by_urls` / `reclaim_running` / `_reset_urls`) |
-
-实测:`user_version = 1`;媒体记录写入/更新/统计正常;**73 passed**。
-
-### 阶段 1:媒体通道(通用 yt-dlp + m3u8/AES-128 + 五平台 + cookie)
-
-新增 `meilab/media/`(1559 行,7 个模块):
-
-| 模块 | 职责 |
-|---|---|
-| `ytdlp_channel.py` | **通用 yt-dlp 通道**:subprocess 调 `python -m yt_dlp`;`--continue` 续传;`--test` 只取前 10KiB;产物认定用**目录快照差集**(不把 `.part`/`.ytdl` 当成果);JS 运行时自动探测 deno/node |
-| `m3u8_downloader.py` | 标准库解析 m3u8(主/变体流、`EXT-X-KEY`、`EXT-X-MAP`)+ pycryptodome AES-128-CBC 解密 + **分片级续传**(`.state.json` 记进度)+ 分片重试 |
-| `resolvers.py` | 五平台解析:B 站**原生 API**(`view` → `playurl`),抖音/小红书/快手/网易云**委托通用 yt-dlp**(这四家直链需请求签名,自研易被平台变更打断) |
-| `wbi.py` | B 站 WBI 签名(nav 取 key → 置换表混合 → MD5 `w_rid`) |
-| `cookies.py` | cookie 文件校验 / **Fernet 加密存储** / Netscape → `Cookie` 头;密钥取 `MELAB_COOKIE_KEY`(回退 `MELAB_KEY`) |
-| `downloader.py` | 编排:m3u8 → 平台原生直链(自研续传)→ 通用 yt-dlp;每条直链过 SSRF;`.part` + 原子改名 + 字节校验 |
-
-新增命令:`mel media` / `mel resolve` / `mel comments`(+ `mel shell` 交互窗口沿用)。
-
-真实回执:
+### 7.3 媒体通道
 
 ```
 # 通用 yt-dlp 通道
@@ -490,56 +422,12 @@ hls-resume: {'ok': True, 'segments': 5, 'bytes': 4624988, 'resumed': True, 'erro
 master playlist: is_master True variant prog_index.m3u8
 direct: {'ok': True, 'bytes': 5731, 'resumed': False, 'error': ''}
 
-# B 站原生解析
-bilibili item: ('【ASMR/KU100】超级温柔的深度采耳⟡ 让人浑身酥麻的', 'bilibili_api', 1, 453914132)
-$ mel resolve --url https://www.bilibili.com/video/BV1Dvpg6BEt5/
-【ASMR/KU100】超级温柔的深度采耳⟡... (bilibili / bilibili_api)
-时长 6972s · B 站原生 API
-  - 高清 720P | mp4 | 453914132 字节
-
-# B 站 CDN 续传能力(只取 1KB)
+# B 站原生解析与 CDN 续传能力
+bilibili item: ('【ASMR/KU100】超级温柔的深度采耳⟡...', 'bilibili_api', 1, 453914132)
 bilibili CDN range: 206 | got bytes: 1024 | content-range: bytes 0-1023/453914132
 ```
 
-**B 站评论**:旧接口 `/x/v2/reply` 已被平台弃用(返回 0 条);新接口
-`/x/v2/reply/wbi/main` 即便带正确 WBI 签名 + 浏览器 cookie(buvid3/b_nut)仍返回
-`-403 访问权限不足`。⇒ 结论:**匿名不可读**,需用户自备 cookie(含 SESSDATA);
-已按此实现(`--cookies` 接入请求头),匿名调用时**如实报出平台原因**而非假装成功:
-
-```
-$ mel comments --url https://www.bilibili.com/video/BV1GJ411x7h7/
-评论接口返回 访问权限不足(平台已限制匿名访问;需要用户自备 cookie 才能读取评论)
-```
-
-单测:**89 passed**(新增 tests/test_media.py 16 项,全部离线,含本地构造的
-AES-128 密文解密往返、m3u8 解析、平台识别、队列媒体记录、cookie 加密往返)。
-
-已知超限文件:`media/m3u8_downloader.py` 331 行、`media/resolvers.py` 389 行
-(后者主要是五平台元数据与注释)。
-
-
-
-- `Episode.rounds_runned` 沿用工程书原文拼写(疑似笔误),不做重命名,仅在 docstring 标注。
-- `DeviceProfile.is_mobile` 与 `mobile` 并存:Playwright 的 `is_mobile` 与工程书的
-  `mobile` 语义可能不同,双字段并存并在 validator 中同步校验。
-- 设备档案的 locale/timezone **按构造保证一致**(由 `sale_region` 经 `REGIONS` 表推导),
-  不允许手写——这比"逐条手写并校验"更不容易出错。
-- 行为模拟的随机源用 `random.Random`(非密码学用途),但**种子**来自 `secrets.randbits(64)`;
-  显式传 seed 时可复现,便于排障。
-- 网络守卫在 Context 创建时按当前域绑定白名单;跨域时 Context 会被销毁重建,
-  守卫随之更新,不会出现"白名单锁死在第一个域"的问题。
-
-### 阶段 2:P0 正确性 + 验证码分支
-
-| 交付 | 内容 |
-|---|---|
-| 租约 + CAS(修报告 D1) | `tasks` 加 `leased_at` / `lease_expires`(schema v2,幂等 ALTER);claim 写租约;`heartbeat()` 续租;`mark_done_checked()` CAS 打卡;`reclaim_expired()` 回收过期租约;引擎每轮回收 + 完成后用 CAS 打卡 |
-| Retry-After + 域名冷却 | `HttpWorker.parse_retry_after()` 支持秒数与 HTTP 日期;429 时按 `Retry-After` 退避(上限 300s)并给该域名设冷却,冷却期内的请求自动延长等待 |
-| Crawl-delay + 每域并发 | `RobotsChecker.crawl_delay()` 暴露 robots 的 Crawl-delay 并参与限速;`WorkerPool.max_per_domain`(默认 20)限制同域在途任务,派发时计数、收到结果时释放、Worker 崩溃时回收名额 |
-| SSRF 加固 | 重定向上限 3→**10 跳**;DNS 判定 **90 秒缓存**(阻断 rebinding);主机名规范化(去 IPv6 zone id / FQDN 尾点);**数字字面量主机名**还原(十进制/十六进制/八进制/省略段/点分四段);补标准库未覆盖的私网段(`100.64/10`、`192.88.99/24`、`198.18/15`、`240/4`、`0.0.0.0/8`) |
-| 验证码分支 | 新增 `meilab/stealth/captcha.py`:ddddocr OCR + cv2 滑块缺口检测;浏览器通道在命中验证码时截图回传;引擎识别成功→回填重试一次,识别不可用→按 §10.4 降级入死信并**如实报出原因** |
-
-真实回执:
+### 7.4 阶段 2 运行时行为
 
 ```
 retry-after 120s: 120.0
@@ -551,106 +439,12 @@ retry-after bad: 0.0
 回收过期租约: 1 → {'pending': 1, 'running': 0, ...}
 ```
 
-SSRF 对抗样本 **26 条全部拦截**(tests/test_ssrf.py),覆盖环回/私网/链路本地/CGNAT/
-云元数据/数字字面量/IPv6 zone id/协议白名单。
+### 7.5 SSRF 对抗样本
 
-单测:**150 passed**(新增 test_queue_lease.py 8 条、test_ssrf.py 31 条、test_captcha.py 6 条)。
+26 条全部拦截(环回 / 私网 / 链路本地 / CGNAT / 6to4 / 基准测试段 / 云元数据 /
+十进制·十六进制·八进制·省略段数字字面量 / IPv6 zone id / FQDN 尾点 / 协议白名单)。
 
-### 阶段 3:数据卫生与提取扩展
-
-| 交付 | 内容 |
-|---|---|
-| 三层脱敏(修报告 D5) | 新增 `meilab/privacy/sanitizer.py`:日志层(`SanitizingFilter`,**挂在 handler 上**——挂 root logger 无效)、旁路层(CLI 输出)、产物层(导出前递归脱敏,深度 6);手机号/邮箱/IP 掩码;**19 类敏感 URL 参数**(token/sign/session/w_rid 等);**队列 URL 不脱敏**的边界保留(签名参数是后续请求的凭据,抹掉会 403) |
-| SimHash + 质量闸(修报告 D6) | 新增 `meilab/storage/quality.py`:64 位 SimHash 近重复检测(汉明距离 ≤3 判重)+ 质量闸(正文 <200 字 / 链接密度 >50% / 实词 <20 → 拒收隔离,不写库) |
-| ETag 条件缓存(修报告 D8) | HTTP 通道记 `ETag`/`Last-Modified`,下次带 `If-None-Match`/`If-Modified-Since`,304 直接复用 |
-| RSS/Atom/sitemap 播种 | 新增 `meilab/router/feed.py`:标准库解析 + **defusedxml**(禁 DTD/实体扩展)+ 体积上限 + 非法 XML 降级为普通页面抓取 |
-| YAML 站点规则(修报告"缺规则系统") | 新增 `meilab/extract/site_rules.py` + `rules/sites/`(bilibili-video / zhihu-question / template);字段支持 `sel/text/attr/transform`;新增 `mel rule validate` / `mel rule test` 离线闭环 |
-| SQLite 导出 | `export_sqlite` 带 FTS5 全文索引;导出格式增至 5 种 |
-
-真实回执:
-
-```
-$ mel rule validate rules/sites/bilibili-video.yaml
-✓ 规则合法:bilibili-video
-  匹配域名: bilibili.com, b23.tv
-  字段: title, author, published, description
-  媒体: cover, thumbnail
-
-ETag 条件请求:
-第一次: 200 | etag: (无)
-第二次(带条件头): 304 | 命中缓存: True
-
-SimHash: 相同文本距离 0 | 不同文本距离 27
-质量闸: 短文 → ['正文过短(1 < 200)', '实词过少(1 < 20)']
-```
-
-新增依赖:`PyYAML 6.0.3`、`defusedxml 0.7.1`(Mimosa 拦截 XML 实体扩展后按建议引入)。
-
-修复的三处真实缺陷:
-1. RSS 的 `<title>` 在 `<channel>` 里,`root.find("title")` 找不到 → 改为递归查找;
-2. Atom 的 `<link>`/`<entry>` **带 XML 命名空间**,`find("link")`/`iter("entry")` 全部失效
-   → 改为按本地名遍历(`_local()`);
-3. 站点规则的 `attr: content`(og:image)没做 URL 补全 → 扩展到
-   `src/content/href/data-src/data-original`。
-
-单测:**178 passed**(新增 test_privacy_quality.py 28 条)。
-
-### 阶段 4:可观测与发版门禁
-
-| 交付 | 内容 |
-|---|---|
-| 可观测三件套 | 新增 `meilab/storage/observability.py`:`stats.jsonl`(每任务一条事件流)、`checkpoint.json`(进度快照,临时文件+原子改名)、`deadletter.jsonl`(批量落库失败兜底,防静默丢失);引擎在任务完成/失败时写入 |
-| 发版门禁 6 项 | 新增 `tools/release_check.py`:版本一致性 / Git 工作区干净 / 全量测试 / ruff 静态基线(只降不升) / 依赖漏洞审计(pip-audit)/ 密钥泄漏扫描;**无法得出结论的检查标记「跳过」,不冒充「通过」** |
-| 文档数字同源 | 新增 `tools/doc_numbers.py`:统计模块数/行数/测试数/规则数,生成 README 的 `<!-- AUTO:NUMBERS -->` 块,`--check` 校验文档数字是否过期 |
-
-真实回执:
-
-```
-$ python tools/doc_numbers.py --print
-{ "包内模块数": 32, "包内代码行": 10093, "测试文件数": 10,
-  "测试代码行": 1576, "测试函数数": 123, "站点规则数": 3 }
-
-$ python tools/doc_numbers.py --check
-[OK] 文档里的数字与代码现状一致
-
-$ python tools/release_check.py
-[OK]     版本一致性: 版本一致:0.1.0
-[FAIL]   Git 工作区干净: 有 4 个未提交改动
-[OK]     全量测试: ..................................  [100%]
-[OK]     ruff 静态基线: ruff 错误 0 个(基线 0,只降不升)
-[OK]     依赖漏洞审计: 未发现已知漏洞
-[OK]     密钥泄漏扫描: 未发现疑似密钥
-
-总计 6 项:通过 5 · 失败 1 · 跳过 0
-```
-
-(唯一 FAIL 是"有未提交改动",提交后即通过。)
-
-新增依赖:`pip-audit 2.10.1`(门禁用)。
-
-### 阶段 3:数据卫生与提取扩展(提交 `9d7a464`)
-
-| 交付 | 内容 |
-|---|---|
-| **三层脱敏**(修报告 D5) | 新增 `meilab/privacy/sanitizer.py`:① 日志层 `SanitizingFilter`(挂在 **handler** 上,挂 root logger 无效);② 旁路层 `sanitize_out()`;③ 产物层(导出前对整条记录递归脱敏,深度 6)。敏感对象:手机号/邮箱/IP + **19 类敏感 URL 参数**。**边界**:队列里的 URL 不脱敏(它是后续请求的凭据,抹签名参数会 403) |
-| SimHash + 质量闸 | `meilab/storage/quality.py`:64 位 SimHash(词哈希用 SHA-256 截断——SimHash 只要求词哈希均匀分布,论文用 MD5 只是惯例)+ 汉明距离近重复判定;质量闸按正文长度/链接密度/实词数拒收低质页面 |
-| 声明式站点规则 | `meilab/extract/site_rules.py` + `rules/sites/*.yaml`(bilibili-video / zhihu-question / template);字段写法 `{sel, text/attr, transform}`;`mel rule validate` / `mel rule test` 离线闭环 |
-| ETag/Last-Modified 缓存 | HTTP 通道带条件请求,304 直接复用既有内容 |
-| RSS/Atom/sitemap 播种 | `meilab/router/feed.py`:defusedxml 解析 + **DTD/实体拒绝 + 5MiB 上限**(防实体扩展攻击);解析失败降级为普通页面抓取 |
-| 导出加 SQLite | `export_sqlite`:带 FTS5 全文索引,可直接检索 |
-| orjson | 导出热路径改用 orjson(带 stdlib 降级) |
-
-### 阶段 4:可观测与发版门禁(提交 `2a8e333`)
-
-| 交付 | 内容 |
-|---|---|
-| 可观测 | `stats.jsonl`(逐事件)+ `checkpoint.json`(断点)+ `deadletter.jsonl`(批量落库失败兜底) |
-| 发版门禁 | `tools/release_check.py` **6 项**:版本一致性 / Git 工作区干净 / 全量测试 / ruff 静态基线(只降不升) / 依赖漏洞审计 / 密钥泄漏扫描。任一失败即阻止发布;无法判定的记 **SKIP**,不冒充 PASS |
-| 数字同源 | `tools/doc_numbers.py`:README 与台账里的行数/用例数由脚本生成,杜绝手工抄录互相矛盾 |
-
-### 阶段 5:终验(本次)
-
-发版门禁全绿:
+### 7.6 发版门禁
 
 ```
 [OK]     版本一致性: 版本一致:0.1.0
@@ -659,27 +453,158 @@ $ python tools/release_check.py
 [OK]     ruff 静态基线: ruff 错误 0 个(基线 0,只降不升)
 [OK]     依赖漏洞审计: 未发现已知漏洞
 [OK]     密钥泄漏扫描: 未发现疑似密钥
+
 总计 6 项:通过 6 · 失败 0 · 跳过 0
 ```
 
-§9 冒烟全清单重跑:
+### 7.7 进程卫生
 
-| # | 项目 | 回执 |
-|---|---|---|
-| 1 | 静态站 | `mel crawl --url https://quotes.toscrape.com/ --max 5` → queued 21 / dispatched 5 / **succeeded 5** / failed 0 |
-| 2 | JS 渲染站 | `mel crawl --url https://quotes.toscrape.com/js/ --max 3` → 通道分布 **http 3 / browser 3**;`/js/` 页 http 通道 0 字符 → 升级 → browser 通道 **1429 字符** |
-| 3 | 指纹自检 | `fingerprint_probe.py` → **标红 0 / 10** |
-| 4 | 统计 | `mel stats` → 通道占比 轻量 60% / 浏览器 40%;仓库 3 篇 |
-| 5 | 导出 | 五格式全过:jsonl 1 / csv 1 / markdown 4 / xlsx 1 / **sqlite 1** |
-| 6 | 断点续传 | `mel resume` 正常 |
-| 7 | 媒体通道 | `mel resolve --url <B站>` → **B 站原生 API**,高清 720P / mp4 / 453,914,132 字节 |
-| 8 | 交互窗口 | `mel shell` → ✓ http 通道 / Quotes to Scrape / 2533 字符 / 3.2s |
-| 9 | 站点规则 | `mel rule validate` 通过;故意写坏的规则报出 3 条问题;`mel rule test` 从真实 B 站页抽出 title/author/description/thumbnail |
-
-本阶段修掉的一个真缺陷:**升级到浏览器通道不消耗 `--max` 预算**。原来"轻量试一次 → 升级"
-会把预算吃掉,循环随即退出,任务留在 pending 永远不跑浏览器通道(实测通道分布 http 8 / browser 0)。
-现在 `_handle_result` 返回"是否终态",升级返回 `False`,`processed` 不计数,
-任务被重新领取并按 `payload.escalate` 派给浏览器通道。修复后通道分布 http 3 / browser 3。
-
-另确认:**正常抓取后无 Worker 进程残留**(实测我们的 python 进程数 = 0);
+正常抓取后**我们的 python 进程残留 = 0**(实测)。
 之前观察到的 2 个残留来自被中断的运行,不是泄漏。
+
+---
+
+## 8. 打通路线回执
+
+> 依据《kiana-crawler × mei-lab 对比报告》,按"五阶段全量清零"执行。
+> 每阶段独立提交、独立可交付。
+
+### 阶段 0:契约与骨架(`cccec02`)
+
+`MediaItem` / `MediaKind` / `MediaStatus` / `MediaPlatform` / `TaskType.MEDIA`;
+`media_downloads` 表 + `PRAGMA user_version` 迁移(v1);`Channel.MEDIA` + `detect_media()`;
+`WorkerKind.MEDIA`;3 处动态拼接 SQL 改参数化语句。
+
+实测:`user_version = 1`;媒体记录写入/更新/统计正常;**73 passed**。
+
+### 阶段 1:媒体通道(`8bbac5a`)
+
+新增 `meilab/media/`(7 个模块)。分发优先级:
+**m3u8 直链 → 平台原生直链 → 通用 yt-dlp 通道**。
+
+| 模块 | 职责 |
+|---|---|
+| `ytdlp_channel.py` | 通用 yt-dlp 通道(subprocess 调 `python -m yt_dlp`;`--continue` 续传;`--test` 快速验证;产物认定用目录快照差集;JS 运行时自动探测) |
+| `m3u8_downloader.py` | 标准库解析 m3u8 + pycryptodome AES-128-CBC + **分片级续传** + 分片重试 |
+| `resolvers.py` | 五平台:B 站原生 API;抖音/小红书/快手/网易云委托通用通道 |
+| `wbi.py` | B 站 WBI 签名 |
+| `cookies.py` | cookie 校验 / Fernet 加密存储 / Netscape → Cookie 头 |
+| `downloader.py` | 编排 + 直链续传下载器 |
+
+新命令:`mel media` / `mel resolve` / `mel comments`。**89 passed**。
+
+### 阶段 2:P0 正确性 + 验证码(`4c3cda2`)
+
+租约 + CAS(修报告 D1:Worker 崩溃后任务永久卡 running);`Retry-After` + 域名冷却;
+robots `Crawl-delay` + 每域并发上限(默认 20);SSRF 加固(10 跳 / DNS TTL 90s /
+主机名规范化 / 数字字面量还原 / 补私网段);验证码分支(ddddocr + cv2,识别成功回填重试一次,
+识别不可用按 §10.4 降级入死信并如实报原因)。**150 passed**。
+
+### 阶段 3:数据卫生与提取扩展(`9d7a464`)
+
+三层脱敏(修报告 D5);SimHash + 质量闸;声明式站点规则(3 条 + 模板 + `rule validate/test`);
+ETag/Last-Modified 条件缓存;RSS/Atom/sitemap 播种(defusedxml + DTD 拒绝 + 5MiB 上限);
+导出加 SQLite(FTS5);orjson 热路径。
+
+### 阶段 4:可观测与发版门禁(`2a8e333`)
+
+`stats.jsonl` / `checkpoint.json` / `deadletter.jsonl`;`tools/release_check.py` 6 项门禁;
+`tools/doc_numbers.py` 数字同源。
+
+### 阶段 5:终验(`1ead3cc` `9956f02`)
+
+修掉「升级不消耗 `--max` 预算」;`doc_numbers.py` 增加 `--write`;
+§9 冒烟全清单重跑;门禁 6/6 全绿;文档终版。**178 passed**。
+
+---
+
+## 9. 已知限制与后续待办
+
+### 9.1 明确的限制(实测结论,非猜测)
+
+| # | 限制 | 说明 |
+|---|---|---|
+| 1 | Patchright 下注入只发生在"加载之后" | 引擎能力探测的必然结果;需要文档级注入时切官方 playwright(代价是暴露 CDP) |
+| 2 | B 站评论匿名不可读 | 平台限制,需自备 cookie |
+| 3 | 抖音/小红书/快手/网易云走通用通道 | 直链签名易被平台变更打断;不保证长期可用 |
+| 4 | `news.ycombinator.com`、`bot.sannysoft.com` 本网络不可达 | 环境限制 |
+| 5 | Google Chrome 未安装 | 机器上已有 Chrome,Patchright 拒绝覆盖 |
+| 6 | 站点规则只有 3 条 | 规则系统已闭环,内容待扩 |
+| 7 | 覆盖率只生成报告,不设阈值 | 事故回归比行覆盖率更能代表质量目标 |
+
+### 9.2 超 300 行的文件(工程书的质量红线)
+
+| 文件 | 量级 | 处置 |
+|---|---|---|
+| `engine.py` | 最大 | 编排集中;再拆需先划清职责边界 |
+| `core/queue.py` | ≈470 | 已冻结,扩展另开文件 |
+| `workers/http.py` | ≈380 | 同上 |
+| `media/resolvers.py` | ≈390 | 五平台元数据与注释占体积 |
+| `stealth/profiles.py` | ≈350 | 设备声明表占体积;新增设备追加声明而非逻辑 |
+| `stealth/behavior.py` | ≈330 | 同上 |
+| `media/m3u8_downloader.py` | ≈330 | — |
+
+### 9.3 后续待办
+
+1. 声明式规则扩面(目标:主流新闻/论坛/电商各 2–3 条);
+2. 代理出口管理与粘性会话;
+3. 覆盖率阈值(先只报告,积累足够事故回归后再设阈值);
+4. 任务优先级分层(目前单一 priority 字段);
+5. `mel media` 的批量模式与断点续传编排。
+
+---
+
+## 10. 保守决策记录
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | `Episode.rounds_runned` 沿用工程书原文拼写 | 不擅自改字段契约,只在 docstring 标注 |
+| 2 | `DeviceProfile.is_mobile` 与 `mobile` 并存 | Playwright 的 `is_mobile` 与工程书的 `mobile` 语义可能不同,双字段并存并在 validator 中同步校验 |
+| 3 | 设备档案的 locale/timezone **按构造保证一致** | 由 `sale_region` 经 `REGIONS` 表推导,不允许手写——比"逐条手写并校验"更不容易出错 |
+| 4 | 行为模拟用 `random.Random`,但种子来自 `secrets.randbits(64)` | 行为统计模拟不是密码学用途;需要"给定种子可复现"以便排障 |
+| 5 | SimHash 词哈希用 SHA-256 截断 | SimHash 只要求词哈希**均匀分布**,论文用 MD5 只是惯例;SHA-256 避免弱哈希碰撞隐患 |
+| 6 | WBI 签名用 MD5 | B 站接口**协议强制**,换 SHA-256 会被服务端直接 -403 拒绝;不是安全原语用途 |
+| 7 | 队列里的 URL **不脱敏** | 它是后续请求的凭据,抹掉签名参数会让续爬 403;产物层才脱敏 |
+| 8 | 网络守卫按 Context 创建时的域绑定白名单 | 跨域时 Context 销毁重建,守卫随之更新,不会"锁死在第一个域" |
+| 9 | 四家平台委托 yt-dlp 而非自研签名 | 平台一次改版即失效;通用通道是更稳的长期路径 |
+| 10 | `opencv-python-headless` 偏离工程书钉死版本 | 4.12.0.88 与 numpy 2.5 冲突,装不上;改 5.0.0.93 并如实留档 |
+
+---
+
+## 11. 复核命令速查
+
+```bash
+cd mei-lab_orchestral_crawler
+
+# —— 规模与数字 ——
+find meilab -name "*.py" ! -name "__init__.py" | wc -l     # 包内模块数
+wc -l $(find meilab -name "*.py") | tail -1                 # 包内代码行
+wc -l $(find tests -name "*.py") | tail -1                   # 测试代码行
+grep -rc "^\s*def test_" tests/*.py | awk -F: '{s+=$2} END {print s}'   # 测试函数数
+python tools/doc_numbers.py --check                          # 文档数字是否过期(非 0 = 过期)
+
+# —— 质量 ——
+./.venv/Scripts/python.exe -m pytest tests/ -v
+./.venv/Scripts/python.exe tools/release_check.py
+
+# —— 冒烟 ——
+mel crawl --url https://quotes.toscrape.com/ --max 5
+mel crawl --url https://quotes.toscrape.com/js/ --max 3
+./.venv/Scripts/python.exe fingerprint_probe.py
+mel stats
+mel export --format markdown --output ./data
+mel resolve --url https://www.bilibili.com/video/BV1Dvpg6BEt5/
+mel rule validate rules/sites/bilibili-video.yaml
+
+# —— 缺失能力核验(应全部无输出)——
+for kw in "Retry-After" crawl_delay sanitiz SimHash checkpoint lease proxy sitemap ETag; do
+  grep -rIl "$kw" meilab tests
+done
+```
+
+> 最后一条用于核验"对比报告 D 列表里的缺失项是否已补齐";若某项有了实现,说明该缺口已关闭,
+> 记得同步更新第 9 节与对比报告。
+
+---
+
+*台账完*
