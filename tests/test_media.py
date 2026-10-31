@@ -279,3 +279,102 @@ def test_dash_tracks_defaults() -> None:
     assert not empty.has_video
     assert not empty.has_audio
     assert empty.quality_desc == ""
+
+
+def test_split_ranges_covers_exactly() -> None:
+    """Range 切分:区间连续、覆盖 [start, total)、不超过最大连接数。"""
+    from meilab.media.dash import MAX_CONNECTIONS, split_ranges
+
+    # 1.25GB,从 0 开始 → 8 连接
+    ranges = split_ranges(0, 1_250_000_000)
+    assert len(ranges) == MAX_CONNECTIONS
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] == 1_250_000_000 - 1
+    for (lo, hi), (next_lo, _) in zip(ranges, ranges[1:]):
+        assert next_lo == hi + 1  # 连续无缝
+        assert hi >= lo
+
+    # 续传场景:从中间开始,区间从 have 起切
+    ranges = split_ranges(500_000_000, 1_250_000_000)
+    assert ranges[0][0] == 500_000_000
+    assert ranges[-1][1] == 1_250_000_000 - 1
+
+    # 小文件:单连接
+    assert split_ranges(0, 4 * 1024 * 1024) == [(0, 4 * 1024 * 1024 - 1)]
+    assert split_ranges(100, 100) == []
+
+
+def test_range_parts_roundtrip(tmp_path: Path) -> None:
+    """分块落盘 → 按序合并 → 清理分块文件,字节数与内容一致。"""
+    from meilab.media.dash import (
+        _range_part,
+        append_range_parts,
+        download_ranges,
+        split_ranges,
+    )
+
+    part = tmp_path / "video.m4s"
+    part.write_bytes(b"HEAD-")  # 模拟已有前缀
+    total = 5 + 64
+    ranges = split_ranges(5, total)
+
+    # download_ranges 需要网络;这里直接手工落分块验证合并逻辑
+    for index, (lo, hi) in enumerate(ranges):
+        _range_part(part, index).write_bytes(bytes([index]) * (hi - lo + 1))
+
+    merged = append_range_parts(part, ranges)
+    assert merged["ok"] is True
+    assert merged["bytes"] == total
+    data = part.read_bytes()
+    assert data.startswith(b"HEAD-")
+    assert len(data) == total
+    # 分块文件已清理
+    assert not _range_part(part, 0).exists()
+
+    # 缺块时报错并保留现场
+    part2 = tmp_path / "audio.m4s"
+    part2.write_bytes(b"X")
+    missing = append_range_parts(part2, [(1, 4)])
+    assert missing["ok"] is False
+
+
+def test_download_ranges_skips_complete_blocks(tmp_path: Path, monkeypatch) -> None:
+    """已完成(大小正确)的分块跳过下载,不发起请求。"""
+    from meilab.media import dash
+    from meilab.media.dash import download_ranges, split_ranges
+
+    ranges = split_ranges(0, 3 * 8 * 1024 * 1024)  # 24MB → 3 块
+    part = tmp_path / "v.m4s"
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(kwargs["headers"]["Range"])
+        lo = int(kwargs["headers"]["Range"].split("=")[1].split("-")[0])
+        hi = int(kwargs["headers"]["Range"].split("=")[1].split("-")[1])
+
+        class Resp:
+            status_code = 206
+
+            def iter_content(self, size):
+                return iter([bytes([lo // 8]) * 4096])
+
+            def close(self):
+                pass
+
+        # 故意给短数据,让写入大小不符 → 该块报错
+        return Resp()
+
+    import curl_cffi.requests as cr
+    monkeypatch.setattr(cr, "get", fake_get)
+
+    # 预置第一块为完成态
+    from meilab.media.dash import _range_part
+    _range_part(part, 0).write_bytes(bytes(ranges[0][1] - ranges[0][0] + 1))
+
+    outcome = download_ranges("https://cdn.test/v", {}, part, ranges)
+    assert outcome["ok"] is False  # fake 数据短,块 1/2 必然报字节数不符
+    # 只为未完成的块 1/2 发了请求(含重试);块 0(完成态)被跳过
+    requested_starts = sorted(
+        {int(r.split("=")[1].split("-")[0]) for r in calls}
+    )
+    assert requested_starts == [ranges[1][0], ranges[2][0]]

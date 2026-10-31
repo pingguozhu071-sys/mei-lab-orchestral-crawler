@@ -164,12 +164,17 @@ def check_tests() -> CheckResult:
 def check_ruff_baseline() -> CheckResult:
     """ruff 静态检查:错误数不得超过基线(只允许下降)。"""
     result = CheckResult("ruff 静态基线")
-    code, out, err = _run([sys.executable, "-m", "ruff", "check", "meilab", "tests", "tools"])
-    if code == 127:
+    code, out, err = _run([sys.executable, "-m", "ruff", "check", "--output-format", "concise",
+                           "meilab", "tests", "tools"])
+    combined = out + err
+    if "No module named ruff" in combined:
         result.status = "skip"
         result.detail = "未安装 ruff(可执行 pip install ruff)"
         return result
-    errors = len([line for line in (out + err).splitlines() if ": error" in line or line.startswith("E")])
+    # concise 格式每条诊断一行:``path:line:col: CODE message``;
+    # 此前的解析器找 ": error"/行首 "E",与该格式永不匹配,错误数恒为 0(检查形同虚设)
+    pattern = re.compile(r": [A-Z]+[0-9]+ ")
+    errors = len([line for line in combined.splitlines() if pattern.search(line)])
     baseline = 0
     if RUFF_BASELINE_FILE.is_file():
         try:

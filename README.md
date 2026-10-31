@@ -20,11 +20,11 @@ CLI + embeddable library · Python 3.12+ · v0.1.0 · Runs on Windows / Linux / 
 | Metric | Value |
 |---|---|
 | Package modules | 33 |
-| Package lines | 10866 |
+| Package lines | 11119 |
 | Test files | 11 |
-| Test lines | 1806 |
-| Test functions | 137 |
-| Site rules | 6 |
+| Test lines | 1905 |
+| Test functions | 140 |
+| Site rules | 8 |
 
 <!-- /AUTO:NUMBERS -->
 

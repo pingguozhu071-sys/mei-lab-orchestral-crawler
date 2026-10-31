@@ -83,6 +83,7 @@ def download_direct(
     :return: ``{"ok", "file", "bytes", "resumed", "error"}``。
     """
     from curl_cffi import requests as curl_requests  # 第三方库:TLS 指纹模拟
+    from . import dash as dash_module
 
     result: dict[str, Any] = {
         "ok": False, "file": str(target), "bytes": 0, "resumed": False, "error": "",
@@ -101,8 +102,9 @@ def download_direct(
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/125.0.0.0"}
     if referer:
         headers["Referer"] = referer
-    if have:
-        headers["Range"] = f"bytes={have}-"
+    # Range 头总是带上(含 bytes=0-):206 响应才能拿到总大小并触发并行分块;
+    # 不支持 Range 的服务端会照常回 200
+    headers["Range"] = f"bytes={have}-"
 
     response = None
     last_error = ""
@@ -125,6 +127,44 @@ def download_direct(
         os.replace(part, target_path)
         result.update({"ok": True, "bytes": target_path.stat().st_size, "resumed": True})
         return result
+
+    # 大文件 + 服务端支持 Range → 多连接并行(CDN 按连接限速的对策)
+    total = 0
+    if response.status_code == 206:
+        try:
+            total = have + int(response.headers.get("content-length") or 0)
+        except (TypeError, ValueError):
+            total = 0
+    if total >= dash_module.PARALLEL_THRESHOLD:
+        response.close()
+        ranges = dash_module.split_ranges(have, total)
+        spread = dash_module.download_ranges(
+            url, dict(headers), part, ranges, timeout=timeout, retries=retries
+        )
+        if spread.get("ok"):
+            merged = dash_module.append_range_parts(part, ranges)
+            if merged.get("ok"):
+                os.replace(part, target_path)
+                result.update(
+                    {"ok": True, "bytes": target_path.stat().st_size, "resumed": bool(have)}
+                )
+                return result
+        # 并行失败不致命:清掉分块残留,落到底下的单连接流式路径重试(part 保留)
+        for index in range(len(ranges)):
+            try:
+                dash_module._range_part(part, index).unlink()
+            except OSError:
+                pass
+        have = part.stat().st_size if part.exists() else 0
+        if have and have < total:
+            response.close()
+            response = curl_requests.get(
+                url, timeout=timeout, impersonate="chrome",
+                headers={**headers, "Range": f"bytes={have}-"}, stream=True,
+            )
+            headers["Range"] = f"bytes={have}-"
+        else:
+            have = 0
 
     mode = "ab" if (have and response.status_code == 206) else "wb"
     if mode == "wb":

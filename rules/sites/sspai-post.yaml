@@ -1,0 +1,19 @@
+name: sspai-post
+# 少数派文章页(sspai.com/post/<id>)——SSR,HTTP 通道直出全量 HTML
+match: [sspai.com]
+item_type: post
+detail:
+  fields:
+    title:
+      sel: "h1"
+      text: true
+    content:
+      sel: ".article-body"
+      text: true
+    summary:
+      sel: "meta[property='og:description']"
+      attr: content
+  media:
+    cover:
+      sel: "meta[property='og:image']"
+      attr: content

@@ -16,6 +16,8 @@
 | `netease-song.yaml` | 网易云歌曲页 | 可用(实测:晴天 / 周杰伦 / 叶惠美 / 269s / 2003-07-31,全部来自 og meta) |
 | `douban-book.yaml` | 豆瓣书籍条目页 | 可用(实测:小王子 / 作者 / 译者 / 出版社 / ISBN / 评分 9.1 / 简介 / 封面) |
 | `thepaper-news.yaml` | 澎湃新闻文章页 | 可用(实测:title / summary / cover;正文容器是构建哈希 class,不写规则) |
+| `sspai-post.yaml` | 少数派文章页 | 可用(rule test 实测:教育的下一步 · 其二,SSR 直出) |
+| `36kr-article.yaml` | 36氪文章页 | 可用(渲染后 HTML 实测:title / author / summary / content / cover;HTTP 通道是壳) |
 | `template.yaml` | 起手模板 | 模板,不参与匹配 |
 
 schema 已扩展 `key` 取值:豆瓣 `#info` 这类「所有元信息挤在一个容器」的键值对页面,
@@ -27,13 +29,17 @@ schema 已扩展 `key` 取值:豆瓣 `#info` 这类「所有元信息挤在一�
 
 | 站点 | 结论 |
 |---|---|
-| 36kr | 纯 SPA(25KB 全是壳,meta/正文全空),HTTP 通道写不了规则;要走浏览器通道 |
-| 少数派 | 返回的是 SPA 壳(2.7KB),同上 |
+| 36kr | **真 SPA**(HTTP 通道 25KB 全是壳,meta/正文全空);规则按渲染后 DOM 写,验证要用浏览器渲染的 HTML 直接喂 `rule.extract`,`mel rule test` 验不了 |
+| 少数派 | **SSR**(HTTP 通道直出全量 HTML)——此前误判为 SPA,是样例 URL 无效(404 回首页)所致;真实 URL 下 `.article-body` / og meta 直接可抽 |
 | 界面 | 样例 URL 404;规则待真实 URL |
 | 贴吧 | HTTP 403(风控),HTTP 通道不可达 |
 | V2EX / Hacker News | 本网络超时(环境限制,非站点问题) |
 | 澎湃 | og meta 可靠;正文 class 全是 `content__bOXdU` 型构建哈希,**不写进规则** |
-| 网易云 / 豆瓣 | 全部信息在 og meta 与语义结构里,是规则覆盖的最佳形态 |
+| 豆瓣电影 | 与书籍同构,但条目页当天被限流(2950 字节拦截壳),待冷却后验证 |
+| 网易云 / 豆瓣书籍 | 全部信息在 og meta 与语义结构里,是规则覆盖的最佳形态 |
+
+**教训:样例 URL 必须真实。** 编造的 ID 被 404 回首页后,渲染结果长得就像 SPA 壳,
+据此会把 SSR 站误判成 SPA。判定 SPA 与否要用真实 URL 的 HTTP 响应字节数对照。
 
 ---
 
@@ -50,12 +56,14 @@ schema 已扩展 `key` 取值:豆瓣 `#info` 这类「所有元信息挤在一�
 ### 优先级 2 —— 主流新闻
 
 - [x] 澎湃(og 字段可用;正文哈希 class 放弃)
-- [ ] 界面 / 少数派 / 36 氪 —— 需浏览器通道产出渲染后 HTML 才能写规则
+- [x] 36 氪(浏览器通道渲染后 DOM;`36kr-article.yaml`)
+- [x] 少数派(SSR,`sspai-post.yaml`)
+- [ ] 界面 —— 需真实 URL
 
 ### 优先级 3 —— 论坛与社区
 
 - [ ] 贴吧 / V2EX / Hacker News —— 本网络不可达或 403,待环境
-- [ ] 豆瓣电影(见优先级 1)
+- [ ] 豆瓣电影(见优先级 1,限流冷却中)
 
 ### 优先级 4 —— 电商
 

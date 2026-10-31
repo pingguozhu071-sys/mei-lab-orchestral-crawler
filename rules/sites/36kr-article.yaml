@@ -1,0 +1,26 @@
+name: 36kr-article
+# 36氪文章页(36kr.com/p/<id> 与 m.36kr.com/p/<id>)
+#
+# 36kr 是真 SPA:HTTP 通道只拿到 25KB 的壳,正文要靠浏览器通道渲染。
+# 规则按渲染后的 DOM 写(语义类名,非构建哈希);`mel rule test` 走 HTTP
+# 验不了本规则,验证方式是用渲染后 HTML 直接喂 rule.extract(见 PENDING.md)。
+match: [36kr.com]
+item_type: news
+detail:
+  fields:
+    title:
+      sel: "h1.article-title, h1"
+      text: true
+    author:
+      sel: ".author-name"
+      text: true
+    summary:
+      sel: "meta[property='og:description']"
+      attr: content
+    content:
+      sel: ".articleDetailContent"
+      text: true
+  media:
+    cover:
+      sel: "meta[property='og:image']"
+      attr: content

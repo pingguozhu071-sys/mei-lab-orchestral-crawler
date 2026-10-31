@@ -50,6 +50,15 @@ PREFERRED_VIDEO_CODEC = "avc1"
 #: ffmpeg 合流超时(秒)
 MUX_TIMEOUT = 600.0
 
+#: 走多连接并行 Range 下载的最低文件大小(小于此值单连接直下更划算)
+PARALLEL_THRESHOLD = 8 * 1024 * 1024
+
+#: 并行下载的最大连接数(B 站 CDN 按连接限速,多连接是标准对策)
+MAX_CONNECTIONS = 8
+
+#: 单个 Range 分块的最小大小(低于这个数不再增加连接)
+MIN_RANGE_BYTES = 8 * 1024 * 1024
+
 
 class DashError(RuntimeError):
     """DASH 解析或下载失败。"""
@@ -174,6 +183,182 @@ def ffmpeg_path() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def split_ranges(start: int, total: int) -> list[tuple[int, int]]:
+    """把 ``[start, total)`` 切成至多 :data:`MAX_CONNECTIONS` 个 Range 区间。
+
+    连接数按大小自适应:每块不少于 :data:`MIN_RANGE_BYTES`,文件小则少开连接。
+
+    :param start: 起点(已有 ``.part`` 的字节数)。
+    :param total: 文件总字节数。
+    :return: ``[(lo, hi), ...]``,闭区间。
+    """
+    remaining = max(0, total - start)
+    if remaining <= 0:
+        return []
+    count = min(MAX_CONNECTIONS, max(1, remaining // MIN_RANGE_BYTES))
+    if remaining <= MIN_RANGE_BYTES:
+        count = 1
+    size = remaining // count
+    ranges: list[tuple[int, int]] = []
+    lo = start
+    for index in range(count):
+        hi = total - 1 if index == count - 1 else lo + size - 1
+        ranges.append((lo, hi))
+        lo = hi + 1
+    return ranges
+
+
+def _range_part(part_path: Path, index: int) -> Path:
+    """第 ``index`` 个 Range 块的落盘文件。"""
+    return part_path.with_name(f"{part_path.name}.r{index}")
+
+
+def download_ranges(
+    url: str,
+    headers: dict[str, str],
+    part_path: Path,
+    ranges: list[tuple[int, int]],
+    *,
+    timeout: float = 120.0,
+    retries: int = 3,
+) -> dict[str, Any]:
+    """并行下载一组 Range 区间到独立分块文件。
+
+    每块的文件名是 ``<part>.r<序号>``,**大小等于区间长度**就是完成态——
+    自描述,不需要状态文件;重启后续传时按大小跳过已完成的块。
+
+    :param url: 直链。
+    :param headers: 请求头(UA / Referer)。
+    :param part_path: 最终 ``.part`` 路径(分块文件挂在它旁边)。
+    :param ranges: ``[(lo, hi), ...]`` 闭区间列表。
+    :param timeout: 单次请求超时(秒)。
+    :param retries: 单块重试次数。
+    :return: ``{"ok", "error"}``。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from curl_cffi import requests as curl_requests  # 第三方库:TLS 指纹模拟
+
+    ensure_ascii_ca_bundle()
+
+    def grab(index: int, lo: int, hi: int) -> str:
+        target = _range_part(part_path, index)
+        expected = hi - lo + 1
+        if target.is_file() and target.stat().st_size == expected:
+            return ""  # 已完成
+        last_error = ""
+        for attempt in range(max(1, retries)):
+            try:
+                response = curl_requests.get(
+                    url, timeout=timeout, impersonate="chrome",
+                    headers={**headers, "Range": f"bytes={lo}-{hi}"}, stream=True,
+                )
+                if response.status_code != 206:
+                    last_error = f"HTTP {response.status_code}(Range 被拒)"
+                    response.close()
+                    continue
+                with target.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1 << 20):
+                        if chunk:
+                            handle.write(chunk)
+                response.close()
+                if target.stat().st_size != expected:
+                    last_error = f"块 {index} 字节数不符: {target.stat().st_size}/{expected}"
+                    continue
+                return ""
+            except Exception as exc:
+                last_error = f"块 {index} 请求失败: {exc!r}"
+                time.sleep(min(3.0, 1.0 * (attempt + 1)))
+        return last_error
+
+    errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=min(MAX_CONNECTIONS, len(ranges))) as pool:
+        futures = [pool.submit(grab, i, lo, hi) for i, (lo, hi) in enumerate(ranges)]
+        for future in futures:
+            error = future.result()
+            if error:
+                errors.append(error)
+    if errors:
+        return {"ok": False, "error": ";".join(errors[:3])}
+    return {"ok": True, "error": ""}
+
+
+def append_range_parts(part_path: Path, ranges: list[tuple[int, int]]) -> dict[str, Any]:
+    """把 Range 分块按序追加进 ``.part``,完成后清理分块文件。
+
+    :param part_path: ``.part`` 路径(应已包含 ``[0, start)`` 的内容)。
+    :param ranges: 与下载时相同的区间列表(用于校验每块大小)。
+    :return: ``{"ok", "bytes", "error"}``。
+    """
+    try:
+        with part_path.open("ab") as out:
+            for index, (lo, hi) in enumerate(ranges):
+                block = _range_part(part_path, index)
+                expected = hi - lo + 1
+                if not block.is_file() or block.stat().st_size != expected:
+                    return {"ok": False, "bytes": 0,
+                            "error": f"块 {index} 缺失或不完整,保留待续传"}
+                with block.open("rb") as src:
+                    while True:
+                        chunk = src.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+        total = part_path.stat().st_size
+        for index in range(len(ranges)):
+            block = _range_part(part_path, index)
+            try:
+                block.unlink()
+            except OSError:
+                pass
+        return {"ok": True, "bytes": total, "error": ""}
+    except OSError as exc:
+        return {"ok": False, "bytes": 0, "error": f"分块合并失败: {exc!r}"}
+
+
+def _probe_speed(
+    url: str,
+    headers: dict[str, str],
+    *,
+    probe_bytes: int = 2 * 1024 * 1024,
+    timeout: float = 10.0,
+) -> float:
+    """测一条直链的单连接速度(MB/s),失败记 0。
+
+    B 站 CDN 的镜像节点速度差异极大(mcdn 这类 P2P 节点甚至直接超时),
+    按固定顺序试主链会把时间浪费在坏链上;先各测一小段再排序,代价是
+    每条候选一次 2MB 的 Range 请求。
+
+    :return: 速度;失败返回 ``0.0``。
+    """
+    from curl_cffi import requests as curl_requests  # 第三方库:TLS 指纹模拟
+
+    started = time.time()
+    try:
+        response = curl_requests.get(
+            url, timeout=timeout, impersonate="chrome",
+            headers={**headers, "Range": f"bytes=0-{probe_bytes - 1}"},
+        )
+        size = len(response.content or b"")
+        response.close()
+    except Exception:
+        return 0.0
+    elapsed = max(time.time() - started, 0.01)
+    if size <= 0:
+        return 0.0
+    return size / 1048576 / elapsed
+
+
+def _ordered_candidates(
+    urls: list[str], headers: dict[str, str], *, timeout: float
+) -> list[str]:
+    """按实测速度给候选直链排序(快的在前;测不动的排最后)。"""
+    if len(urls) <= 1:
+        return list(urls)
+    speeds = {url: _probe_speed(url, headers, timeout=timeout) for url in urls}
+    return sorted(urls, key=lambda u: -speeds.get(u, 0.0))
+
+
 def _download_track(
     urls: list[str],
     target: Path,
@@ -208,6 +393,9 @@ def _download_track(
     if cookie_header:
         headers["Cookie"] = cookie_header
 
+    # 多候选时先测速排序:主链不一定是快的(mcdn 类节点甚至超时)
+    urls = _ordered_candidates(urls, headers, timeout=min(timeout, 10.0))
+
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_suffix(target.suffix + ".part")
     last_error = ""
@@ -218,8 +406,9 @@ def _download_track(
             continue
         have = part.stat().st_size if part.exists() else 0
         attempt_headers = dict(headers)
-        if have:
-            attempt_headers["Range"] = f"bytes={have}-"
+        # Range 头总是带上(含 bytes=0-):服务端回 206 时才能拿到总大小,
+        # 并行分块路径才有触发条件;不支持 Range 的服务端会照常回 200
+        attempt_headers["Range"] = f"bytes={have}-"
         for attempt in range(max(1, retries)):
             try:
                 ensure_ascii_ca_bundle()
@@ -234,6 +423,33 @@ def _download_track(
             if response.status_code >= 400:
                 last_error = f"分轨请求失败: HTTP {response.status_code}"
                 break
+
+            # 大文件 + 服务端支持 Range → 多连接并行(CDN 按连接限速的对策)
+            total = 0
+            if response.status_code == 206:
+                try:
+                    total = have + int(response.headers.get("content-length") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+            if total >= PARALLEL_THRESHOLD:
+                response.close()
+                ranges = split_ranges(have, total)
+                spread = download_ranges(
+                    url, attempt_headers, part, ranges, timeout=timeout, retries=retries
+                )
+                if not spread.get("ok"):
+                    last_error = str(spread.get("error") or "并行分块下载失败")
+                    continue  # 换下一条直链(分块保留,可续传)
+                merged = append_range_parts(part, ranges)
+                if not merged.get("ok"):
+                    last_error = str(merged.get("error") or "分块合并失败")
+                    continue
+                os.replace(part, target)
+                result.update(
+                    {"ok": True, "bytes": target.stat().st_size, "resumed": bool(have)}
+                )
+                return result
+
             mode = "ab" if (have and response.status_code == 206) else "wb"
             try:
                 with part.open(mode) as handle:
@@ -248,12 +464,8 @@ def _download_track(
                 {"ok": True, "bytes": target.stat().st_size, "resumed": bool(have)}
             )
             return result
-        # 这条直链不行,退到下一条
-        if part.exists():
-            try:
-                part.unlink()
-            except OSError:
-                pass
+        # 这条直链不行,退到下一条 —— .part 与分块都保留,续传要用
+        # (下一条直链若不支持 Range 会走 200 从头写,不会用到旧进度)
     result["error"] = last_error or "分轨下载失败"
     return result
 
@@ -285,7 +497,8 @@ def mux_tracks(
         "-i", str(video_file),
         "-i", str(audio_file),
         "-c", "copy",
-        "-movflags", "+faststart",
+        # 不用 -movflags +faststart:它要求 ffmpeg 全文件重写第二遍(1GB 级多花 ~7s);
+        # moov 在文件尾对本地播放无损,只影响网络边下边播场景
         str(out_path),
     ]
     try:
