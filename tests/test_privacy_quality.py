@@ -224,6 +224,69 @@ def test_match_rule_picks_first_match() -> None:
     assert match_rule(rules, "https://demo.test/x") is not None
 
 
+def test_keyed_field_splits_kv_container() -> None:
+    """key 取值:豆瓣 #info 这类键值对容器能按键拆字段。"""
+    rule = parse_rule(
+        {
+            "name": "kv",
+            "match": ["douban.test"],
+            "detail": {
+                "fields": {
+                    "author": {"sel": "#info span.pl", "key": "作者"},
+                    "translator": {"sel": "#info span.pl", "key": "译者"},
+                    "publisher": {"sel": "#info span.pl", "key": "出版社"},
+                }
+            },
+        }
+    )
+    html = """<div id="info">
+        <span class="pl">作者</span>: <a href="/a">张三</a><br>
+        <span class="pl">译者</span>: <a href="/t">李四</a><br>
+        <span class="pl">出版社:</span> 人民文学出版社<br>
+        <span class="pl">出版年:</span> 2003-8
+    </div>"""
+    out = rule.extract(html)
+    assert out["fields"]["author"] == "张三"
+    assert out["fields"]["translator"] == "李四"
+    assert out["fields"]["publisher"] == "人民文学出版社"
+    # 没配的字段不出现
+    assert "出版年" not in str(out)
+
+
+def test_keyed_field_missing_key_returns_nothing() -> None:
+    """容器里没有这个键时,字段不出现(不报错、不猜测)。"""
+    rule = parse_rule(
+        {
+            "name": "kv",
+            "match": ["douban.test"],
+            "detail": {"fields": {"isbn": {"sel": "#info span.pl", "key": "ISBN"}}},
+        }
+    )
+    out = rule.extract(html='<div id="info"><span class="pl">作者</span>: 张三</div>')
+    assert out["fields"] == {}
+
+
+def test_meta_content_text_is_not_urljoined() -> None:
+    """og:title 这类纯文本 content 不被当 URL 拼;以 / 开头的值才补全。"""
+    rule = parse_rule(
+        {
+            "name": "meta",
+            "match": ["demo.test"],
+            "detail": {
+                "fields": {"title": {"sel": "meta[property='og:title']", "attr": "content"}},
+                "media": {"cover": {"sel": "meta[property='og:image']", "attr": "content"}},
+            },
+        }
+    )
+    html = (
+        '<meta property="og:title" content="晴天">'
+        '<meta property="og:image" content="/img/cover.jpg">'
+    )
+    out = rule.extract(html, "https://demo.test/song?id=1")
+    assert out["fields"]["title"] == "晴天"
+    assert out["media"]["cover"] == "https://demo.test/img/cover.jpg"
+
+
 # ----------------------------------------------------------------- 订阅源
 
 RSS = """<?xml version="1.0"?>

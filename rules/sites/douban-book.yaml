@@ -1,0 +1,36 @@
+name: douban-book
+# 豆瓣书籍条目页(book.douban.com/subject/<id>/)
+match: [book.douban.com]
+item_type: book
+detail:
+  fields:
+    title:
+      sel: "span[property='v:itemreviewed']"
+      text: true
+    # #info 容器把所有元信息挤在一起(「作者 : 张三」这种键值对),
+    # 用 key 语法精确拆字段,而不是整段塞进一个字段
+    author:
+      sel: "#info span.pl"
+      key: "作者"
+    translator:
+      sel: "#info span.pl"
+      key: "译者"
+    publisher:
+      sel: "#info span.pl"
+      key: "出版社"
+    pub_year:
+      sel: "#info span.pl"
+      key: "出版年"
+    isbn:
+      sel: "#info span.pl"
+      key: "ISBN"
+    rating:
+      sel: ".rating_num"
+      text: true
+    summary:
+      sel: "#link-report .intro"
+      text: true
+  media:
+    cover:
+      sel: "meta[property='og:image']"
+      attr: content

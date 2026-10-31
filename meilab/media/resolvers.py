@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import urllib.parse
 from typing import Any
@@ -97,14 +96,18 @@ def bilibili_resolve(
     *,
     cookies: str | None = None,
     timeout: float = 25.0,
-    quality: int = 64,
+    quality: int = 0,
 ) -> MediaItem | None:
     """解析 B 站视频直链(原生 API,匿名可用)。
 
+    先请求 DASH(``fnval=4048``):清晰度上限高(带登录态可达 1080P60),
+    代价是视频与音频分轨、需要 ffmpeg 合流。拿不到 DASH 时退回
+    ``fnval=1`` 的 mp4(durl)单文件流,清晰度封顶 720P。
+
     :param url: 视频页 URL。
-    :param cookies: 用户自备 cookie(有则带上,可提升清晰度)。
+    :param cookies: 用户自备 cookie(有则带上,可提升清晰度上限)。
     :param timeout: 超时(秒)。
-    :param quality: 请求的清晰度(64 = 720P,16 = 360P)。
+    :param quality: 请求的清晰度 id;``0`` 表示取账号可用的最高档。
     :return: 媒体条目;解析失败返回 ``None``。
     """
     bvid = bilibili_video_id(url)
@@ -131,9 +134,30 @@ def bilibili_resolve(
     if not cid:
         return None
 
+    # qn=0 让平台按账号权限给最高档(匿名则给匿名上限)
+    qn = quality if quality else 0
     play = _get_json(
         f"https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}"
-        f"&qn={quality}&fnval=1&fourk=1",
+        f"&qn={qn}&fnval=4048&fourk=1",
+        referer=BILIBILI_REFERER, timeout=timeout, cookie_header=cookie_value,
+    )
+    play_data = (play.get("data") or {}) if play.get("code") == 0 else {}
+
+    duration = float(data.get("duration") or 0.0)
+    accept_quality = play_data.get("accept_quality") or []
+
+    # 1) DASH:优先,清晰度上限更高
+    dash_item = _bilibili_dash_item(
+        url, bvid, data, play_data, dash_data=play_data.get("dash"),
+        duration=duration, accept_quality=accept_quality,
+    )
+    if dash_item is not None:
+        return dash_item
+
+    # 2) 退回 mp4(durl)单文件流
+    play = _get_json(
+        f"https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}"
+        f"&qn={qn or 64}&fnval=1&fourk=1",
         referer=BILIBILI_REFERER, timeout=timeout, cookie_header=cookie_value,
     )
     if play.get("code") != 0:
@@ -143,7 +167,6 @@ def bilibili_resolve(
     if not durl:
         return None
 
-    duration = float(data.get("duration") or 0.0)
     streams = []
     for part in durl:
         stream_url = str(part.get("url") or "")
@@ -182,6 +205,93 @@ def bilibili_resolve(
     )
 
 
+def _bilibili_dash_item(
+    url: str,
+    bvid: str,
+    view_data: dict[str, Any],
+    play_data: dict[str, Any],
+    *,
+    dash_data: Any,
+    duration: float,
+    accept_quality: list[Any],
+) -> MediaItem | None:
+    """把 DASH 响应拼成一个 :class:`MediaItem`。
+
+    视频轨与音频轨各占一条 ``streams`` 记录,靠 ``kind`` 区分;
+    备用直链放进 ``meta.dash``,由下载器在主链失败时退避。
+
+    :param url: 视频页 URL。
+    :param bvid: BV 号。
+    :param view_data: ``view`` 接口的 data。
+    :param play_data: ``playurl`` 接口的 data。
+    :param dash_data: ``playurl`` 响应里的 ``dash`` 字段。
+    :param duration: 视频时长(秒)。
+    :param accept_quality: 平台给出的可用清晰度列表。
+    :return: 媒体条目;没有可用轨时返回 ``None``。
+    """
+    if not dash_data:
+        return None
+    try:
+        from .dash import select_dash_tracks
+
+        tracks = select_dash_tracks(dash_data)
+    except Exception:
+        return None
+    if tracks is None or not tracks.has_video:
+        return None
+
+    streams: list[dict[str, Any]] = [
+        {
+            "url": tracks.video["url"],
+            "size": 0,
+            "kind": "video",
+            "quality": tracks.quality,
+            "quality_desc": tracks.quality_desc,
+            "ext": "m4s",
+            "bitrate": tracks.video.get("bitrate", 0),
+            "width": tracks.width,
+            "height": tracks.height,
+            "codecs": tracks.codecs,
+        }
+    ]
+    if tracks.has_audio:
+        streams.append(
+            {
+                "url": tracks.audio["url"],
+                "size": 0,
+                "kind": "audio",
+                "quality": tracks.quality,
+                "quality_desc": tracks.quality_desc,
+                "ext": "m4a",
+                "bitrate": tracks.audio.get("bitrate", 0),
+            }
+        )
+
+    return MediaItem(
+        source=url,
+        media_id=bvid,
+        kind=MediaKind.VIDEO,
+        platform=MediaPlatform.BILIBILI,
+        streams=streams,
+        method="bilibili_dash",
+        title=str(view_data.get("title") or ""),
+        duration=duration or tracks.duration,
+        needs_cookie=False,
+        meta={
+            "cid": view_data.get("cid"),
+            "aid": view_data.get("aid"),
+            "owner": ((view_data.get("owner") or {}).get("name") or ""),
+            "accept_quality": accept_quality,
+            "dash": {
+                "video_backups": tracks.video_backups,
+                "audio_backups": tracks.audio_backups,
+                "quality": tracks.quality,
+                "quality_desc": tracks.quality_desc,
+            },
+        },
+    )
+
+
 def bilibili_comments(
     url: str,
     *,
@@ -191,13 +301,21 @@ def bilibili_comments(
 ) -> tuple[list[dict[str, Any]], str]:
     """抓 B 站视频评论。
 
-    旧接口 ``/x/v2/reply`` 已被平台弃用(返回 0 条),现在走
-    ``/x/v2/reply/wbi/main`` —— 需要 **WBI 签名**;并且平台对匿名请求返回
-    ``-403 访问权限不足``,此时需要**用户自备 cookie**(含 SESSDATA)才能读到评论。
+    走 ``/x/v2/reply`` 接口(``pn`` 翻页,每页 20 条)。实测结论:
+
+    * ``/x/v2/reply/wbi/main`` 恒定返回 ``-403 访问权限不足`` —— 该端点被平台
+      限制,加登录态、加风控参数都不放行,因此**不作为采集路径**;
+    * ``/x/v2/reply/main`` 能返回数据但 ``pagination_str.offset`` 不生效,
+      多次请求拿到同一页,**不能用来翻页**;
+    * ``/x/v2/reply`` 的 ``pn`` 翻页正常(实测 48 条评论分 2 页取完,页间不重复),
+      且楼中楼回复内嵌在 ``replies`` 里。
+
+    登录态的作用是**条数**而非能否访问:匿名能读到评论但只有 3 条,
+    带 SESSDATA 的 cookie 能读到完整 20 条/页。
 
     :param url: 视频页 URL。
     :param page: 页码(从 1 开始)。
-    :param cookies: 用户自备 cookie 文件路径。
+    :param cookies: 用户自备 cookie 文件路径(可选,影响单页条数)。
     :param timeout: 超时(秒)。
     :return: ``(评论列表, 说明)``;说明里写明失败原因(如需登录态)。
     """
@@ -221,38 +339,22 @@ def bilibili_comments(
     if not aid:
         return [], f"取不到 aid(code={view.get('code')})"
 
-    # WBI 签名(拿不到 key 就明确降级,不静默返回空)
-    try:
-        from .wbi import get_mixin_key, sign
-
-        mixin = get_mixin_key(timeout=timeout)
-        params = sign(
-            {
-                "oid": aid,
-                "type": 1,
-                "mode": 3,
-                "pagination_str": json.dumps({"offset": ""}, ensure_ascii=False),
-                "plat": 1,
-                "seek_rpid": "",
-                "web_location": "1315875",
-            },
-            mixin,
-        )
-    except Exception as exc:
-        return [], f"WBI 签名失败: {exc!r}"
-
-    query = urllib.parse.urlencode(params)
+    query = urllib.parse.urlencode({"type": 1, "oid": aid, "pn": max(1, page), "sort": 2})
     reply = _get_json(
-        f"https://api.bilibili.com/x/v2/reply/wbi/main?{query}",
+        f"https://api.bilibili.com/x/v2/reply?{query}",
         referer=BILIBILI_REFERER, timeout=timeout, cookie_header=cookie_value,
     )
     if reply.get("code") != 0:
         reason = str(reply.get("message") or reply.get("code"))
         if reply.get("code") == -403:
-            reason += "(平台已限制匿名访问;需要用户自备 cookie 才能读取评论)"
+            reason += "(平台已限制访问;需要用户自备 cookie 才能读取完整评论)"
         return [], f"评论接口返回 {reason}"
+
     data = reply.get("data") or {}
     replies = data.get("replies") or []
+    page_info = data.get("page") or {}
+    total = int(page_info.get("count") or 0)
+
     out: list[dict[str, Any]] = []
     for item in replies:
         member = (item.get("member") or {})
@@ -264,18 +366,29 @@ def bilibili_comments(
                 "message": content.get("message"),
                 "like": item.get("like"),
                 "ctime": item.get("ctime"),
+                "rcount": item.get("rcount"),
                 "replies": [
                     {
                         "author": ((sub.get("member") or {}).get("uname")),
                         "message": ((sub.get("content") or {}).get("message")),
+                        "like": sub.get("like"),
                     }
-                    for sub in (item.get("replies") or [])[:5]
+                    for sub in (item.get("replies") or [])
                 ],
             }
         )
     if not out:
-        return [], "该视频没有评论(平台返回 0 条)"
-    return out, f"取到 {len(out)} 条评论"
+        if total == 0:
+            return [], "该视频没有评论(平台返回 0 条)"
+        return [], f"第 {page} 页没有评论(该视频共 {total} 条)"
+
+    note = f"取到 {len(out)} 条评论(第 {page} 页"
+    if total:
+        note += f",共 {total} 条"
+    note += ")"
+    if not cookie_value:
+        note += ";匿名只能读到部分评论,带 cookie 可读全量"
+    return out, note
 
 
 #: 委托给通用 yt-dlp 通道的平台
@@ -343,6 +456,7 @@ def resolve_media(
     platform: MediaPlatform | None = None,
     cookies: str | None = None,
     timeout: float = 120.0,
+    quality: int = 0,
 ) -> tuple[MediaItem | None, str]:
     """解析一个媒体 URL(平台优先,失败回退通用通道)。
 
@@ -350,15 +464,17 @@ def resolve_media(
     :param platform: 已知平台;为 ``None`` 时自动判断。
     :param cookies: 用户自备 cookie。
     :param timeout: 超时(秒)。
+    :param quality: 请求的清晰度 id(``0`` = 取账号可用最高档)。
     :return: ``(媒体条目, 说明)``;条目为 ``None`` 时说明里是失败原因。
     """
-    from . import ytdlp_channel
 
     target = platform or detect_platform(url)
     if target is MediaPlatform.BILIBILI:
-        item = bilibili_resolve(url, cookies=cookies)
+        item = bilibili_resolve(url, cookies=cookies, quality=quality)
         if item is not None:
-            return item, "B 站原生 API"
+            note = "B 站原生 API(DASH 分轨)" if item.method == "bilibili_dash" \
+                else "B 站原生 API(mp4 单文件)"
+            return item, note
         # 原生失败 → 回退通用通道
         item = delegated_resolve(
             url, MediaPlatform.BILIBILI, cookies=cookies, timeout=timeout

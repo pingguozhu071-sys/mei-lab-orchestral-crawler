@@ -1,0 +1,19 @@
+name: thepaper-news
+# 澎湃新闻文章页(thepaper.cn/newsDetail_forward_<id>)
+#
+# 正文容器用的是带构建哈希的 class(如 content__bOXdU),发版即失效,不写进规则;
+# 稳定的字段只有 Open Graph meta。标题/摘要/封面可靠,正文交给框架的启发式提取。
+match: [thepaper.cn]
+item_type: news
+detail:
+  fields:
+    title:
+      sel: "meta[property='og:title']"
+      attr: content
+    summary:
+      sel: "meta[property='og:description']"
+      attr: content
+  media:
+    cover:
+      sel: "meta[property='og:image']"
+      attr: content

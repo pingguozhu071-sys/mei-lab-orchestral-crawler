@@ -153,6 +153,59 @@ def download_direct(
     return result
 
 
+def _download_dash_item(
+    item: MediaItem,
+    out_dir: Path,
+    *,
+    audio_only: bool,
+    timeout: float,
+) -> dict[str, Any]:
+    """下载一个 DASH 条目(视频轨 + 音频轨 + ffmpeg 合流)。
+
+    :param item: 媒体条目(``method`` 为 ``bilibili_dash``)。
+    :param out_dir: 输出目录。
+    :param audio_only: 只取音频。
+    :param timeout: 单次请求超时(秒)。
+    :return: ``{"ok", "file", "bytes", "error"}``。
+    """
+    from . import dash as dash_module
+
+    streams = {str(s.get("kind") or "video"): s for s in item.streams if s.get("url")}
+    video = streams.get("video") or {}
+    audio = streams.get("audio") or {}
+    if not video.get("url"):
+        return {"ok": False, "file": "", "bytes": 0, "error": "没有可用的视频轨"}
+
+    dash_meta = (item.meta or {}).get("dash") or {}
+    tracks = dash_module.DashTracks(
+        video={"url": str(video["url"]), "bitrate": video.get("bitrate", 0)},
+        audio=(
+            {"url": str(audio["url"]), "bitrate": audio.get("bitrate", 0)}
+            if audio.get("url") else {}
+        ),
+        quality=int(dash_meta.get("quality") or 0),
+        quality_desc=str(dash_meta.get("quality_desc") or ""),
+        width=int(video.get("width") or 0),
+        height=int(video.get("height") or 0),
+        codecs=str(video.get("codecs") or ""),
+        duration=item.duration,
+        video_backups=[str(u) for u in (dash_meta.get("video_backups") or [])],
+        audio_backups=[str(u) for u in (dash_meta.get("audio_backups") or [])],
+    )
+
+    ext = "m4a" if audio_only else "mp4"
+    target = out_dir / _safe_filename(item.title or item.media_id, item.media_id, ext)
+    # CDN 在 bilivideo.com,与 cookie 的域不同 —— 只带 Referer,不带 cookie
+    outcome = dash_module.download_dash(
+        tracks, target,
+        referer="https://www.bilibili.com/",
+        timeout=timeout,
+        audio_only=audio_only,
+    )
+    outcome["quality_desc"] = tracks.quality_desc
+    return outcome
+
+
 def download_media(
     url: str,
     output_dir: str | os.PathLike[str],
@@ -162,6 +215,7 @@ def download_media(
     prefer: str = "auto",
     timeout: float = 120.0,
     queue: Any | None = None,
+    quality: int = 0,
 ) -> MediaResult:
     """抓取一个媒体 URL(解析 + 下载)。
 
@@ -172,6 +226,7 @@ def download_media(
     :param prefer: ``auto`` / ``native`` / ``ytdlp``——优先用哪种解析路径。
     :param timeout: 解析超时(秒)。
     :param queue: 可选的 :class:`~meilab.core.queue.TaskQueue`,用于落下载记录。
+    :param quality: 请求的清晰度 id(``0`` = 取账号可用最高档)。
     :return: 抓取结果。
     """
     started = time.time()
@@ -217,7 +272,7 @@ def download_media(
         note = "按要求只走通用 yt-dlp 通道"
     else:
         item, note = resolve_media(
-            url, platform=platform, cookies=cookies, timeout=timeout
+            url, platform=platform, cookies=cookies, timeout=timeout, quality=quality
         )
         if item is None and prefer == "native":
             note = "原生解析失败(按要求不回落通用通道)"
@@ -242,8 +297,18 @@ def download_media(
     result.method = item.method
     result.platform = item.platform.value
 
-    # 4) 下载:原生直链走自研续传下载器,其余交给通用通道
-    if item.method == "bilibili_api" and item.best_stream:
+    # 4) 下载:DASH 分轨走合流器,原生单文件直链走续传下载器,其余交给通用通道
+    if item.method == "bilibili_dash":
+        dash_result = _download_dash_item(item, out_dir, audio_only=audio_only, timeout=timeout)
+        result.ok = bool(dash_result.get("ok"))
+        result.error = str(dash_result.get("error") or "")
+        if result.ok:
+            result.files = [str(dash_result.get("file"))]
+            result.bytes = int(dash_result.get("bytes") or 0)
+        result.note = (
+            f"{result.note};" if result.note else ""
+        ) + f"DASH 合流:{dash_result.get('quality_desc') or '未知清晰度'}"
+    elif item.method == "bilibili_api" and item.best_stream:
         stream = item.best_stream
         ext = str(stream.get("ext") or "mp4")
         target = out_dir / _safe_filename(item.title or item.media_id, item.media_id, ext)

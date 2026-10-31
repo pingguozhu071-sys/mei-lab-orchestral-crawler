@@ -184,6 +184,8 @@ def export(fmt: str, output: str, db: str | None) -> None:
 @click.option("--output", "-o", default="data/media", help="输出目录")
 @click.option("--cookies", default=None, help="用户自备 cookie 文件(Netscape 格式)")
 @click.option("--audio", "audio_only", is_flag=True, help="只要音频")
+@click.option("--quality", default=0, type=int,
+              help="请求的清晰度 id(0=取账号可用最高档;B 站:116=1080P60,80=1080P,64=720P)")
 @click.option("--prefer", type=click.Choice(["auto", "native", "ytdlp"]), default="auto",
               help="解析路径偏好:auto=平台优先回落通用通道;native=只用平台解析器;ytdlp=只用通用通道")
 @click.option("--timeout", default=120.0, type=float, help="解析超时(秒)")
@@ -193,6 +195,7 @@ def media(
     output: str,
     cookies: str | None,
     audio_only: bool,
+    quality: int,
     prefer: str,
     timeout: float,
     as_json: bool,
@@ -205,7 +208,7 @@ def media(
     try:
         result = download_media(
             url, output, cookies=cookies, audio_only=audio_only,
-            prefer=prefer, timeout=timeout, queue=queue,
+            prefer=prefer, timeout=timeout, queue=queue, quality=quality,
         )
     finally:
         queue.close()
@@ -228,14 +231,18 @@ def media(
 @cli.command()
 @click.option("--url", "-u", required=True, help="媒体页面 URL")
 @click.option("--cookies", default=None, help="用户自备 cookie 文件")
+@click.option("--quality", default=0, type=int,
+              help="请求的清晰度 id(0=取账号可用最高档)")
 @click.option("--timeout", default=120.0, type=float, help="解析超时(秒)")
 @click.option("--json", "as_json", is_flag=True, help="以 JSON 输出结果")
-def resolve(url: str, cookies: str | None, timeout: float, as_json: bool) -> None:
+def resolve(url: str, cookies: str | None, quality: int, timeout: float, as_json: bool) -> None:
     """只解析媒体直链,不下载。"""
     from .media import detect_platform, resolve_media
 
     platform = detect_platform(url)
-    item, note = resolve_media(url, platform=platform, cookies=cookies, timeout=timeout)
+    item, note = resolve_media(
+        url, platform=platform, cookies=cookies, timeout=timeout, quality=quality
+    )
     if item is None:
         console.print(f"[red]解析失败[/red] {note}")
         raise SystemExit(1)
@@ -264,12 +271,12 @@ def resolve(url: str, cookies: str | None, timeout: float, as_json: bool) -> Non
 
 @cli.command()
 @click.option("--url", "-u", required=True, help="B 站视频页 URL")
-@click.option("--page", default=1, type=int, help="评论页码")
+@click.option("--page", default=1, type=int, help="评论页码(每页 20 条)")
 @click.option("--limit", default=20, type=int, help="最多显示多少条")
-@click.option("--cookies", default=None, help="用户自备 cookie 文件(匿名已被平台限制)")
+@click.option("--cookies", default=None, help="用户自备 cookie 文件(匿名只能读到部分评论)")
 @click.option("--json", "as_json", is_flag=True, help="以 JSON 输出结果")
 def comments(url: str, page: int, limit: int, cookies: str | None, as_json: bool) -> None:
-    """抓 B 站视频评论(公开接口,需 WBI 签名;匿名受限时用 --cookies)。"""
+    """抓 B 站视频评论(每页 20 条,带 cookie 可读全量)。"""
     from .media import bilibili_comments
 
     items, note = bilibili_comments(url, page=page, cookies=cookies)
@@ -283,6 +290,8 @@ def comments(url: str, page: int, limit: int, cookies: str | None, as_json: bool
     for item in items[:limit]:
         console.print(f"[cyan]{item.get('author')}[/cyan] ({item.get('like')} 赞)")
         console.print(f"  {item.get('message')}")
+        for sub in item.get("replies") or []:
+            console.print(f"    [dim]└ {sub.get('author')}: {sub.get('message')}[/dim]")
 
 
 @cli.group("rule")

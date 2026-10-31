@@ -15,10 +15,13 @@
       media:
         images:   {sel: "article img", attr: src}
 
-字段值支持三种写法:
+字段值支持四种写法:
 * ``{sel: "CSS 选择器", text: true}`` —— 取可见文本;
 * ``{sel: "CSS 选择器", attr: src}`` —— 取属性;
-* ``{sel: "...", text: true, transform: date_parse}`` —— 取文本后做转换。
+* ``{sel: "...", text: true, transform: date_parse}`` —— 取文本后做转换;
+* ``{sel: "CSS 选择器", key: "作者"}`` —— 键值对:在 ``sel`` 命中的标签里找
+  文本等于该键的那个,取它后面第一个非空兄弟节点(豆瓣 ``#info`` 这类
+  「所有元信息挤在一个容器」的页面用)。
 
 支持的选择器语法是 CSS 选择器(不是 XPath)。规则不匹配时静默跳过,不报错。
 """
@@ -99,10 +102,14 @@ class FieldSpec:
     text: bool = False
     attr: str = ""
     transform: str = ""
+    #: 键值对取值:匹配到的标签文本等于该键时,取它后面那个兄弟节点的内容
+    key: str = ""
 
     @property
     def is_empty(self) -> bool:
         """是否什么都没配(等价于不抽这个字段)。"""
+        if self.key:
+            return not self.sel
         return not self.sel and not self.attr and not self.text
 
 
@@ -161,6 +168,10 @@ def _extract_field(soup: Any, spec: FieldSpec, base_url: str = "") -> Any:
     """按字段规则抽一个值。"""
     if spec.is_empty:
         return None
+
+    if spec.key:
+        return _extract_keyed(soup, spec, base_url)
+
     try:
         element = soup.select_one(spec.sel)
     except Exception:
@@ -179,13 +190,54 @@ def _extract_field(soup: Any, spec: FieldSpec, base_url: str = "") -> Any:
                 value = func(value)
             except Exception:
                 pass
-    # URL 类型的属性补成绝对路径
+    # URL 类型的属性补成绝对路径 —— 只补「看起来是相对路径」的值:
+    # og:title / og:description 这类 meta 的 content 是纯文本,不是 URL
     if spec.attr in ("src", "content", "href", "data-src", "data-original") \
-            and base_url and isinstance(value, str) and value:
+            and base_url and isinstance(value, str) and value.startswith(("/", "./", "../")):
         from urllib.parse import urljoin
 
         value = urljoin(base_url, value)
     return value
+
+
+def _extract_keyed(soup: Any, spec: FieldSpec, base_url: str = "") -> Any:
+    """按「键值对」抽一个字段。
+
+    豆瓣条目页这类结构把所有元信息塞进同一个容器
+    (``作者 : 张三`` / ``出版社: 人民文学出版社``),纯 CSS 选择器拆不开。
+    ``key`` 语义:在 ``sel`` 匹配到的全部标签里找文本等于该键的那个,
+    取它后面第一个**非空**兄弟节点(文本节点或元素)的内容。
+
+    :param soup: 解析后的页面。
+    :param spec: 字段规则(须带 ``sel`` 与 ``key``)。
+    :param base_url: 基准 URL(键值对场景一般用不到,保留对齐)。
+    :return: 值;找不到该键返回 ``None``。
+    """
+    try:
+        elements = soup.select(spec.sel)
+    except Exception:
+        return None
+    for element in elements:
+        label = element.get_text(" ", strip=True).rstrip(":： ")
+        if label != spec.key.rstrip(":： "):
+            continue
+        sibling = element.next_sibling
+        while sibling is not None:
+            if hasattr(sibling, "name"):
+                if sibling.name in ("br", "script", "style"):
+                    sibling = sibling.next_sibling
+                    continue
+                text = sibling.get_text(" ", strip=True)
+            else:
+                text = str(sibling).strip()
+            if text:
+                # 豆瓣的「作者」键后面跟着一个孤立的冒号文本节点,跳过
+                if text in (":", "：", "·"):
+                    sibling = sibling.next_sibling
+                    continue
+                return text
+            sibling = sibling.next_sibling
+    return None
 
 
 def parse_rule(data: dict[str, Any], source_path: str = "") -> SiteRule:
@@ -222,6 +274,7 @@ def _parse_fields(block: dict[str, Any]) -> dict[str, FieldSpec]:
             text=bool(value.get("text")),
             attr=str(value.get("attr") or ""),
             transform=str(value.get("transform") or ""),
+            key=str(value.get("key") or ""),
         )
     return out
 
@@ -255,6 +308,10 @@ def validate_rule(data: dict[str, Any]) -> list[str]:
                 continue
             if not spec.get("sel"):
                 issues.append(f"{section}.{name} 缺少 sel")
+            if spec.get("key") and spec.get("attr"):
+                issues.append(f"{section}.{name} 同时写了 key 与 attr")
+            if spec.get("key") and spec.get("text"):
+                issues.append(f"{section}.{name} 同时写了 key 与 text")
             transform = str(spec.get("transform") or "")
             if transform and transform not in TRANSFORMS:
                 issues.append(f"{section}.{name} 用了未知 transform:{transform}")

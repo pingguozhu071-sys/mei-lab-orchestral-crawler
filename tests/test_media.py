@@ -227,3 +227,55 @@ def test_ytdlp_available_and_js_runtime() -> None:
 def test_m3u8_error_type() -> None:
     """m3u8 异常类型存在。"""
     assert issubclass(M3u8Error, RuntimeError)
+
+
+def test_select_dash_tracks_prefers_highest_and_avc() -> None:
+    """DASH 选轨:取最高清晰度档;同档内 H.264 优先于 H.265。"""
+    from meilab.media.dash import select_dash_tracks
+
+    dash = {
+        "duration": 60.0,
+        "video": [
+            {"id": 116, "codecs": "hev1.1.6.L123.90", "bandwidth": 2000000,
+             "width": 1920, "height": 1080, "baseUrl": "https://cdn.test/hev.m4s",
+             "backupUrl": ["https://b.test/hev.m4s"]},
+            {"id": 116, "codecs": "avc1.640033", "bandwidth": 1500000,
+             "width": 1920, "height": 1080, "baseUrl": "https://cdn.test/avc.m4s"},
+            {"id": 80, "codecs": "avc1.640032", "bandwidth": 900000,
+             "width": 1920, "height": 1080, "baseUrl": "https://cdn.test/80.m4s"},
+        ],
+        "audio": [
+            {"id": 30280, "codecs": "mp4a.40.2", "bandwidth": 65000,
+             "baseUrl": "https://cdn.test/a-low.m4s"},
+            {"id": 30216, "codecs": "mp4a.40.2", "bandwidth": 195000,
+             "baseUrl": "https://cdn.test/a-high.m4s"},
+        ],
+    }
+    tracks = select_dash_tracks(dash)
+    assert tracks is not None
+    assert tracks.quality == 116
+    assert tracks.quality_desc == "1080P60"
+    # 同档内 avc1 排在前面(即便带宽更低);选中的是 avc 条目,它没有备用直链
+    assert "avc" in tracks.video["url"]
+    assert tracks.video_backups == []
+    # 音频取码率最高的一条
+    assert tracks.audio["url"] == "https://cdn.test/a-high.m4s"
+    assert tracks.has_video and tracks.has_audio
+
+
+def test_select_dash_tracks_empty_dash() -> None:
+    """没有视频轨时返回 None,不让下游拿到空轨。"""
+    from meilab.media.dash import select_dash_tracks
+
+    assert select_dash_tracks({}) is None
+    assert select_dash_tracks({"video": [], "audio": []}) is None
+
+
+def test_dash_tracks_defaults() -> None:
+    """DashTracks 的空状态判定。"""
+    from meilab.media.dash import DashTracks
+
+    empty = DashTracks()
+    assert not empty.has_video
+    assert not empty.has_audio
+    assert empty.quality_desc == ""

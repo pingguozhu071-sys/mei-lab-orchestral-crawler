@@ -47,7 +47,11 @@
 - 三层 residual:原始 HTML / 清洗后 DOM / Markdown
 - JSON API、JSON-LD、`__NEXT_DATA__`、`window.__NUXT__`
 - PDF(pymupdf,可选依赖,缺失时明确降级)
-- 声明式站点规则:YAML + `mel rule validate` / `mel rule test`
+- 声明式站点规则:YAML + `mel rule validate` / `mel rule test`;
+  字段支持 `key` 键值对取值(豆瓣 `#info` 类容器);meta 纯文本
+  content 不被误拼为 URL
+- 内置规则 6 条:B 站视频、网易云歌曲、豆瓣书籍、澎湃新闻、知乎问答、起手模板,
+  前四条经真实页面 `rule test` 验证
 - 质量闸:正文长度、链接密度、实词数三项判据
 
 **媒体**
@@ -55,7 +59,10 @@
 - 通用 yt-dlp 通道:子进程调用,`--continue` 续传,产物用目录快照差集认定
 - m3u8:标准库解析,支持 `EXT-X-KEY`(AES-128)、`EXT-X-MAP`,分片级续传
 - 直链下载:Range 续传、`.part`、原子改名、字节校验
-- Bilibili 原生解析(`view` → `playurl`)+ WBI 签名
+- DASH 分轨下载 + ffmpeg 合流(`fnval=4048`):B 站解锁 1080P60,
+  缺 ffmpeg 时明确报错并保留分轨;CDN 请求只带 Referer 不跨域带 cookie
+- Bilibili 原生解析(`view` → `playurl`,DASH 优先、mp4 durl 兜底)+ WBI 签名
+- 评论采集:`/x/v2/reply` + `pn` 翻页 + 楼中楼内嵌(实测 48 条 2 页取完)
 - 抖音 / 小红书 / 快手 / 网易云委托通用通道
 - 自备 cookie:文件校验、Fernet 加密存储、Netscape → Cookie 头
 
@@ -106,10 +113,11 @@
 ### 已知问题
 
 - Patchright 1.61.2 不执行 `add_init_script`,指纹注入只能发生在页面加载之后
-- B 站评论接口匿名返回 `-403`,需自备 cookie
+- B 站评论只能走 `/x/v2/reply`(`reply/wbi/main` 恒定 -403);匿名单页仅 3 条,带 cookie 20 条
+- DASH 合流依赖机器上有 ffmpeg;缺失时保留分轨并明确报错
 - 七个文件超过 300 行,已冻结
 - 覆盖率只报告,不设阈值
-- 站点规则仅覆盖 3 个站点
+- 站点规则覆盖 6 个站点;36kr / 少数派为纯 SPA,需浏览器通道才能扩规则
 
 详见 [技术白皮书 · 已知架构债](docs/WHITEPAPER.md#5-已知架构债)
 与 [工程经验记录](docs/ENGINEERING-LESSONS.md)。

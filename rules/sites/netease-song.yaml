@@ -1,0 +1,33 @@
+name: netease-song
+# 网易云音乐歌曲页
+match: [music.163.com]
+item_type: music
+detail:
+  fields:
+    # 歌曲页的可用字段几乎都在 Open Graph / microdata 里,
+    # 不依赖带构建哈希的 class 名 —— 发版不易失效。
+    title:
+      sel: "meta[property='og:title']"
+      attr: content
+    artist:
+      sel: "meta[property='og:music:artist']"
+      attr: content
+    album:
+      sel: "meta[property='og:music:album']"
+      attr: content
+    duration:
+      sel: "meta[property='music:duration']"
+      attr: content
+    released:
+      sel: "meta[property='music:release_date']"
+      attr: content
+    description:
+      sel: "meta[name='description']"
+      attr: content
+  media:
+    cover:
+      sel: "meta[property='og:image']"
+      attr: content
+    play_url:
+      sel: "meta[property='og:audio']"
+      attr: content
