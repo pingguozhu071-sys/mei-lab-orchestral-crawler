@@ -590,6 +590,15 @@ class Engine:
                 "reasons": quality.reasons,
             }
             if not quality.ok and len(extraction.content) < 200:
+                # 正文极短 + 轻量通道 → 多半是"空壳页"(内容要靠 JS 渲染),
+                # 先升级到浏览器通道重试一次,而不是直接判失败。
+                if result.channel == "http" and self._escalate(result.task_id, summary):
+                    episode.outcome = Outcome.DEGRADED
+                    episode.error = "质量闸拒收(正文过短),已升级到浏览器通道重试"
+                    episode.raw_meta = dict(extraction.meta)
+                    summary.errors.append(f"{url}: {episode.error}")
+                    self.queue.save_episode(episode)
+                    return
                 episode.outcome = Outcome.DEGRADED
                 episode.error = "质量闸拒收:" + ";".join(quality.reasons)
                 episode.raw_meta = dict(extraction.meta)
