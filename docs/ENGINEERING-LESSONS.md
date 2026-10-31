@@ -27,6 +27,8 @@
 | 媒体 | G-13 | yt-dlp 的中间态不是产物 |
 | 媒体 | G-14 | 平台解析器不能是唯一路径 |
 | 媒体 | G-16 | B 站 CDN 支持 Range |
+| 编码 | G-17 | 非 UTF-8 页面按声明字符集解码 |
+| robots | G-18 | robots 检查不得依赖默认 UA 抓取 |
 | 平台 | G-10 | B 站评论匿名不可读 |
 | 依赖 | G-15 | opencv 与 numpy 的版本冲突 |
 
@@ -565,6 +567,92 @@ ERROR: ResolutionImpossible
 
 版本偏离必须原样记录,不能默默换版本还声称装的是原版本。这条回执同时写在
 [构建与运行](BUILD.md) 与项目状态文件里。
+
+---
+
+## 真实样本
+
+> 以下两条来自 2026-10-31 的真实样本验证。样本由独立的采集流程提供:
+> 简书 robots.txt、浙江美术馆(gb2312)、建築研究所(Shift_JIS)、
+> 四平台公开分享链接。验证方法:修复前抓一遍留缺陷回执,修复后复抓对照。
+
+### G-17 非 UTF-8 页面按 UTF-8 强解,正文全是乱码
+
+**现象**
+
+`mel crawl` 抓 gb2312 / Shift_JIS 页面,"成功"入库,但正文不可读:
+
+```
+修复前:zjam.org.cn(gb2312)      title='�㽭������' len=461  U+FFFD=243
+修复前:kenken.go.jp(Shift_JIS)  len=18478  U+FFFD=10091
+```
+
+统计上一切正常,只有打开导出文件才能看到全是替换符。**这类缺陷不会报警,
+只会在你真正去读产物时爆炸。**
+
+**根因**
+
+提取管线的 `_decode()` 写死了 UTF-8。而这类页面的编码声明就摆在两处:
+响应头 `Content-Type: text/html; charset=gb2312`、HTML 的 `<meta charset>`。
+声明一直在,没人读。
+
+**排查时的弯路**
+
+样本报告先发现"curl 不加 `--compressed` 时 grep 不到 meta 标签",怀疑是 gzip 问题。
+实测本框架的链路:curl_cffi 透明解压,拿到的是"编码错但结构完整"的文本——
+不是 gzip 问题。教训同 G-06:**先确认正确的期望值,再判断生效与否。**
+
+**处置**
+
+`_decode(body, content_type)`:
+
+1. 优先读响应头的 `charset=`;
+2. 头缺失时读前 2KB 的 `<meta charset>`(与浏览器行为一致);
+3. gb2312 / gbk 统一映射到超集 `gb18030`,避免声明 gb2312 实际含扩展字时解码失败;
+4. 声明的编码器不存在时退回 UTF-8,不抛异常。
+
+**复核**
+
+```
+修复后:zjam    gb2312      title='浙江美术馆'          U+FFFD=0
+修复后:kenken  Shift_JIS   title='国立研究開発法人 建築研究所'  U+FFFD=0
+```
+
+单测:`tests/test_extract_html.py` 三个用例(gb2312 头声明 / Shift_JIS meta 声明 /
+UTF-8 回归)。
+
+---
+
+### G-18 robots 检查静默失效
+
+**现象**
+
+简书 robots.txt 里明明写着 `Crawl-delay: 10`(Googlebot 组),
+`RobotsChecker('Googlebot').crawl_delay()` 却返回 0.0。
+
+**根因**
+
+`_load()` 用的是 `RobotFileParser.read()`,它拿 **urllib 默认 UA**
+(`Python-urllib/3.x`)去请求 robots.txt。拒绝该 UA 的站点返回非 200,
+parser 解析到空内容,于是整个检查退化成"全部允许、无延迟"——
+而且**没有任何告警**。
+
+这条比 G-17 更危险:G-17 的后果可见(乱码),G-18 的后果是"以为在遵守规则,
+实际什么规则都没读到"。
+
+**处置**
+
+`_load()` 改用本框架的抓取栈(curl_cffi + 浏览器 UA + CA 路径修复),
+状态码非 200 显式返回 `None`;新增 `load_text()` 支持离线喂文本(单测用)。
+
+**复核**
+
+```
+修复后:Googlebot crawl_delay = 10.0   Chrome-UA crawl_delay = 0.0(* 组无声明,正确)
+```
+
+单测:`tests/test_robots.py` 5 个用例,含豆瓣 robots 的反例——
+注释行 `# Crawl-delay: 5` 不等于指令。
 
 ---
 

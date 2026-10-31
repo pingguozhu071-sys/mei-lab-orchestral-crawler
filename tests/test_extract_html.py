@@ -148,3 +148,49 @@ def test_short_page_uses_fallback_or_is_marked() -> None:
     assert result.strategy in ("density", "trafilatura")
     if result.strategy == "density":
         assert result.text_length < 200
+
+
+# ------------------------------------------------------------------ 管线字符集
+
+
+def test_pipeline_decodes_gb2312_by_header() -> None:
+    """响应头声明 gb2312 的页面必须按 gb18030 解码,不能按 UTF-8 强解(G-17)。"""
+    from meilab.extract.pipeline import ExtractionPipeline
+
+    html = (
+        "<html><head><title>浙江美术馆</title></head><body><p>"
+        + "正在举办当代艺术作品展览,欢迎广大市民前来参观。" * 6
+        + "</p></body></html>"
+    )
+    pipeline = ExtractionPipeline()
+    result = pipeline.extract(html.encode("gb18030"), "text/html; charset=gb2312")
+    assert "浙江美术馆" in result.title
+    assert "当代艺术作品展览" in result.content
+    assert "\ufffd" not in result.content
+
+
+def test_pipeline_decodes_by_meta_charset() -> None:
+    """响应头没给 charset 时,读 <meta charset>(Shift_JIS 样本路径)。"""
+    from meilab.extract.pipeline import ExtractionPipeline
+
+    body = (
+        "<html><head><meta http-equiv=\"Content-Type\" "
+        "content=\"text/html; charset=Shift_JIS\"></head><body><p>"
+        + "建築研究所の研究概要と公開情報です。" * 8
+        + "</p></body></html>"
+    )
+    pipeline = ExtractionPipeline()
+    result = pipeline.extract(body.encode("shift_jis"), "text/html")
+    assert "建築研究所" in result.content
+    assert "\ufffd" not in result.content
+
+
+def test_pipeline_utf8_unchanged() -> None:
+    """UTF-8 页面行为不变(回归保护)。"""
+    from meilab.extract.pipeline import ExtractionPipeline
+
+    html = "<html><head><title>普通页面</title></head><body><p>" + "正文" * 100 + "</p></body></html>"
+    pipeline = ExtractionPipeline()
+    result = pipeline.extract(html.encode("utf-8"), "text/html; charset=utf-8")
+    assert "普通页面" in result.title
+    assert "\ufffd" not in result.content

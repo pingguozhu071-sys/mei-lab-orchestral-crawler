@@ -169,13 +169,42 @@ class RobotsChecker:
             return True
 
     def _load(self, base: str) -> urllib.robotparser.RobotFileParser | None:
-        """下载并解析某个站点的 robots.txt,失败返回 ``None``。"""
-        parser = urllib.robotparser.RobotFileParser()
-        parser.set_url(f"{base}/robots.txt")
+        """下载并解析某个站点的 robots.txt,失败返回 ``None``。
+
+        用本框架的抓取栈(curl_cffi + 浏览器 UA)而不是 ``parser.read()`` 的
+        默认 urllib 请求——后者会被拒绝默认 Python UA 的站点挡掉,
+        使 robots 检查**静默失效**成"全部允许、无延迟"(见经验记录 G-18)。
+        """
+        url = f"{base}/robots.txt"
+        safe, _why = check_url_safe(url)
+        if not safe:
+            return None
         try:
-            parser.read()
+            from curl_cffi import requests as curl_requests  # 第三方库:TLS 指纹模拟
+
+            ensure_ascii_ca_bundle()
+            response = curl_requests.get(
+                url,
+                timeout=10.0,
+                impersonate="chrome",
+                headers={"User-Agent": self.user_agent},
+            )
+            if response.status_code != 200:
+                return None
+            return self.load_text(response.text or "", base)
         except Exception:
             return None
+
+    def load_text(self, text: str, base: str) -> urllib.robotparser.RobotFileParser:
+        """用已取到的 robots 文本初始化缓存(离线测试与复现场景用)。
+
+        :param text: robots.txt 内容。
+        :param base: 站点根(形如 ``https://example.com``)。
+        :return: 解析后的 parser(已写入缓存)。
+        """
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse((text or "").splitlines())
+        self._cache[base] = parser
         return parser
 
 

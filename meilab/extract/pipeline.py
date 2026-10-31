@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -74,16 +75,70 @@ def sniff_body(body: bytes | str | None) -> str:
     return "text"
 
 
-def _decode(body: bytes | str | None) -> str:
-    """把字节流解码为文本。"""
+#: 常见别名 → Python 编解码器名。gb2312/gbk 统一用超集 gb18030,
+#: 避免"声明 gb2312 实际含 GBK 扩展字"时个别字解码失败。
+_CHARSET_ALIASES: dict[str, str] = {
+    "gb2312": "gb18030",
+    "gbk": "gb18030",
+    "gb18030": "gb18030",
+    "shift-jis": "shift_jis",
+    "shift_jis": "shift_jis",
+    "sjis": "shift_jis",
+    "euc-jp": "euc_jp",
+    "euc_jp": "euc_jp",
+    "big5": "big5",
+    "big5-hkscs": "big5",
+    "utf-8": "utf-8",
+    "utf8": "utf-8",
+}
+
+#: HTML 里的 <meta charset> 声明(只看前 2KB,与浏览器行为一致)
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_-]+)""", re.IGNORECASE
+)
+
+
+def _declared_charset(content_type: str, body: bytes | None) -> str:
+    """取声明的字符集:优先响应头,缺失时看 HTML 的 meta charset。
+
+    :param content_type: 响应头 Content-Type。
+    :param body: 响应体字节。
+    :return: 规范化后的编解码器名;没有声明返回空串。
+    """
+    name = ""
+    match = re.search(r"charset\s*=\s*\"?([A-Za-z0-9_-]+)", content_type or "", re.IGNORECASE)
+    if match:
+        name = match.group(1)
+    elif body:
+        meta = _META_CHARSET_RE.search(bytes(body[:2048]))
+        if meta:
+            name = meta.group(1).decode("ascii", errors="ignore")
+    return _CHARSET_ALIASES.get(name.lower(), name.lower())
+
+
+def _decode(body: bytes | str | None, content_type: str = "") -> str:
+    """把字节流解码为文本。
+
+    编码取声明的 charset(响应头优先,meta charset 兜底);不声明按 UTF-8。
+    非字节输入原样返回。这一步修掉的问题:gb2312 / Shift_JIS / EUC-JP 页面
+    按 UTF-8 强解会得到满屏 U+FFFD(见工程经验记录 G-17)。
+
+    :param body: 响应体。
+    :param content_type: 响应头 Content-Type(用于取 charset)。
+    :return: 解码后的文本。
+    """
     if body is None:
         return ""
     if isinstance(body, str):
         return body
-    try:
-        return bytes(body).decode("utf-8", errors="replace")
-    except Exception:
-        return ""
+    data = bytes(body)
+    charset = _declared_charset(content_type, data)
+    if charset and charset not in ("utf-8", "utf8", "ascii"):
+        try:
+            return data.decode(charset, errors="replace")
+        except LookupError:
+            pass  # 声明的编码器不存在,退回 UTF-8
+    return data.decode("utf-8", errors="replace")
 
 
 def _structured_fields(data: Any) -> dict[str, Any]:
@@ -187,13 +242,13 @@ class ExtractionPipeline:
         result.kind = kind if kind != "unknown" else "unknown"
 
         if kind == "json":
-            return self._extract_json(result, body, url)
+            return self._extract_json(result, body, content_type or "", url)
         if kind == "pdf":
             return self._extract_pdf(result, body, url)
         if kind == "html":
-            return self._extract_html(result, body, url)
+            return self._extract_html(result, body, content_type or "", url)
         if kind == "text":
-            text = _decode(body).strip()
+            text = _decode(body, content_type or "").strip()
             result.content = text
             result.content_hash = sha256_of(text)
             result.strategy = "plain_text"
@@ -208,9 +263,9 @@ class ExtractionPipeline:
 
     # ------------------------------------------------------------------ 内部
 
-    def _extract_json(self, result: ExtractResult, body: Any, url: str) -> ExtractResult:
+    def _extract_json(self, result: ExtractResult, body: Any, content_type: str, url: str) -> ExtractResult:
         """JSON 提取。"""
-        parsed = parse_json_response(_decode(body))
+        parsed = parse_json_response(_decode(body, content_type))
         if not parsed.ok:
             result.error = parsed.notes[0] if parsed.notes else "JSON 解析失败"
             result.meta = {"url": url}
@@ -227,9 +282,9 @@ class ExtractionPipeline:
         }
         return result
 
-    def _extract_html(self, result: ExtractResult, body: Any, url: str) -> ExtractResult:
+    def _extract_html(self, result: ExtractResult, body: Any, content_type: str, url: str) -> ExtractResult:
         """HTML 提取:先走正文提取,再尝试结构化数据(JSON-LD / hydration state)。"""
-        html = _decode(body)
+        html = _decode(body, content_type)
         extraction = extract_html(html, use_fallback=self.use_fallback)
         result.kind = "html"
         result.title = extraction.title
