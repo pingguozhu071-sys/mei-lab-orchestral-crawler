@@ -71,7 +71,12 @@ python fingerprint_probe.py
 | `mel crawl --url URL [--url URL2] [--max N]` | 抓取(默认遵守 robots.txt,全局限速 ≥1.5s) |
 | `mel resume [--max N]` | 断点续传:继续处理队列里未完成的任务 |
 | `mel stats` | 任务 / Episode / 仓库统计,含轻量 vs 浏览器通道占比 |
-| `mel export --format markdown\|jsonl\|csv\|xlsx --output DIR` | 导出(按域名分目录) |
+| `mel export --format markdown\|jsonl\|csv\|xlsx\|sqlite --output DIR` | 导出(按域名分目录;sqlite 带 FTS5 全文索引) |
+| `mel media --url URL [--audio] [--cookies F]` | **媒体抓取**:平台解析器 → 通用 yt-dlp 通道 → m3u8/AES-128 |
+| `mel resolve --url URL` | 只解析媒体直链,不下载 |
+| `mel comments --url URL [--cookies F]` | B 站评论(匿名已被平台限制,需自备 cookie) |
+| `mel rule validate <file.yaml>` | 校验声明式站点规则 |
+| `mel rule test <file.yaml> --url URL` | 用真实页面试跑规则 |
 
 ### 交互窗口(`mel shell`)
 
@@ -100,14 +105,16 @@ url> :quit
 ### 工程规模(由 `tools/doc_numbers.py` 生成,勿手改)
 
 <!-- AUTO:NUMBERS -->
+
 | 指标 | 数值 |
 |---|---|
 | 包内模块数 | 32 |
-| 包内代码行 | 10093 |
+| 包内代码行 | 10119 |
 | 测试文件数 | 10 |
 | 测试代码行 | 1576 |
 | 测试函数数 | 123 |
 | 站点规则数 | 3 |
+
 <!-- /AUTO:NUMBERS -->
 
 校验命令(数字过期则返回非 0,可挂 CI):

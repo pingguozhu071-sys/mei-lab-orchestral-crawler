@@ -126,6 +126,27 @@ def check_document(path: Path) -> tuple[bool, list[str]]:
     return (not problems), problems
 
 
+def write_document(path: Path, numbers: dict[str, Any]) -> bool:
+    """把文档里的自动数字块替换成实时统计(有改动才写盘)。
+
+    :param path: 文档路径。
+    :param numbers: 数字字典。
+    :return: 是否发生了改动。
+    """
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    if BLOCK_START not in text or BLOCK_END not in text:
+        return False
+    start = text.index(BLOCK_START)
+    end = text.index(BLOCK_END) + len(BLOCK_END)
+    updated = text[:start] + render_block(numbers) + text[end:]
+    if updated == text:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
 def main() -> int:
     """命令行入口。
 
@@ -134,11 +155,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="文档数字同源工具")
     parser.add_argument("--check", action="store_true", help="校验文档数字是否过期")
     parser.add_argument("--print", action="store_true", help="打印当前统计")
+    parser.add_argument("--write", action="store_true", help="把实时数字写回文档的自动块")
     args = parser.parse_args()
 
     numbers = collect()
     if args.print:
         print(json.dumps(numbers, ensure_ascii=False, indent=2))
+        return 0
+    if args.write:
+        changed = [
+            name for name in ("README.md", "PROJECT_STATE.md")
+            if write_document(ROOT / name, numbers)
+        ]
+        if changed:
+            print(f"[OK] 已更新:{', '.join(changed)}")
+        else:
+            print("[OK] 文档数字本来就是最新的")
         return 0
     if args.check:
         problems: list[str] = []

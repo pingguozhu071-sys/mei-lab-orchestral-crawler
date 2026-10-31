@@ -253,8 +253,11 @@ class Engine:
                 for result in pool.drain(max_items=10, timeout=0.4):
                     inflight = max(0, inflight - 1)
                     pool.release(result.task_id)  # 释放域名在途名额
-                    self._handle_result(result, summary)
-                    processed += 1
+                    consumed = self._handle_result(result, summary)
+                    # 升级到浏览器通道的"尝试"不消耗 --max 预算:
+                    # 那是同一个任务的换通道重试,不是一个新任务
+                    if consumed:
+                        processed += 1
 
                 # 3) 崩溃检测与重启
                 restarted = pool.reap()
@@ -326,20 +329,27 @@ class Engine:
 
             deadline = time.time() + max(60.0, self.config.timeout * 3)
             got = False
+            consumed = True
             while time.time() < deadline and not got:
                 for result in pool.drain(max_items=1, timeout=1.0):
                     summary = CrawlSummary()
-                    self._handle_result(result, summary)
+                    consumed = self._handle_result(result, summary)
                     payload = result.payload or {}
                     outcome["signals"] = list(payload.get("signals") or [])
                     outcome["url"] = str(payload.get("final_url") or url)
                     outcome["channel"] = result.channel
                     if summary.succeeded:
                         outcome["ok"] = True
+                    elif not consumed:
+                        # 被升级到浏览器通道重试了:本轮不算失败,继续下一轮
+                        outcome["error"] = ""
+                        outcome["ok"] = False
                     else:
-                        outcome["error"] = (summary.errors[0] if summary.errors else "抓取失败")
+                        outcome["error"] = (
+                            summary.errors[0] if summary.errors else "抓取失败"
+                        )
                     got = True
-            if outcome["ok"] or not got:
+            if outcome["ok"] or not got or consumed:
                 break
 
         outcome["elapsed"] = time.time() - started
@@ -505,8 +515,14 @@ class Engine:
             tasks.extend(self.queue.claim(limit=remaining, worker_id=self._worker_id))
         return tasks
 
-    def _handle_result(self, result: WorkerResult, summary: CrawlSummary) -> None:
-        """把 Worker 结果转成 Episode,提取内容并落库。"""
+    def _handle_result(self, result: WorkerResult, summary: CrawlSummary) -> bool:
+        """把 Worker 结果转成 Episode,提取内容并落库。
+
+        :param result: Worker 回传的结果。
+        :param summary: 统计累加器。
+        :return: 任务是否已**终态**(消耗预算)。返回 ``False`` 表示任务被重新
+            入队换通道重试(升级到浏览器通道),调用方不应计入已处理数。
+        """
         payload = result.payload or {}
         url = str(payload.get("url") or "")
         if url and url not in summary.urls:
@@ -538,7 +554,7 @@ class Engine:
                     summary.errors.append(f"{url}: {episode.error}")
                     self._retry_task(result.task_id)
                     self.queue.save_episode(episode)
-                    return
+                    return False  # 重新入队,不消耗预算
 
             episode.outcome = Outcome.BLOCKED if signals else Outcome.FAILED
             episode.error = str(payload.get("error") or result.error or "未知错误")
@@ -553,7 +569,7 @@ class Engine:
             self.observability.stats.emit(
                 "task_failed", url=url, reason=episode.error[:200], signals=signals,
             )
-            return
+            return True
 
         # 提取内容:浏览器通道给的是 html,HTTP 通道给的是原始字节
         body: Any = payload.get("html")
@@ -598,7 +614,7 @@ class Engine:
                     episode.raw_meta = dict(extraction.meta)
                     summary.errors.append(f"{url}: {episode.error}")
                     self.queue.save_episode(episode)
-                    return
+                    return False  # 重新入队,不消耗预算
                 episode.outcome = Outcome.DEGRADED
                 episode.error = "质量闸拒收:" + ";".join(quality.reasons)
                 episode.raw_meta = dict(extraction.meta)
@@ -606,7 +622,7 @@ class Engine:
                 summary.errors.append(f"{url}: {episode.error}")
                 self._finish_task(result.task_id, success=False)
                 self.queue.save_episode(episode)
-                return
+                return True
         episode.title = extraction.title
         episode.content = extraction.content
         episode.content_hash = extraction.content_hash
@@ -629,14 +645,14 @@ class Engine:
                 episode.error = "空壳 HTML,已升级到浏览器通道重试"
                 episode.raw_meta["escalated"] = True
                 self.queue.save_episode(episode)
-                return
+                return False  # 重新入队,不消耗预算
             episode.outcome = Outcome.DEGRADED
             episode.error = extraction.error or "未提取到内容"
             summary.failed += 1
             summary.errors.append(f"{url}: {episode.error}")
             self._finish_task(result.task_id, success=False)
             self.queue.save_episode(episode)
-            return
+            return True
 
         # 落内容仓库(增量 diff)
         try:
@@ -668,6 +684,7 @@ class Engine:
 
         # URL 发现:把同域新链接入队(受深度与数量限制)
         self._discover_links(url, body, episode, summary)
+        return True
 
     def _looks_like_shell(self, body: Any) -> bool:
         """判断响应是不是"空壳 HTML"(正文要靠 JS 渲染)。

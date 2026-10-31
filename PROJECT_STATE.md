@@ -627,3 +627,59 @@ $ python tools/release_check.py
 (唯一 FAIL 是"有未提交改动",提交后即通过。)
 
 新增依赖:`pip-audit 2.10.1`(门禁用)。
+
+### 阶段 3:数据卫生与提取扩展(提交 `9d7a464`)
+
+| 交付 | 内容 |
+|---|---|
+| **三层脱敏**(修报告 D5) | 新增 `meilab/privacy/sanitizer.py`:① 日志层 `SanitizingFilter`(挂在 **handler** 上,挂 root logger 无效);② 旁路层 `sanitize_out()`;③ 产物层(导出前对整条记录递归脱敏,深度 6)。敏感对象:手机号/邮箱/IP + **19 类敏感 URL 参数**。**边界**:队列里的 URL 不脱敏(它是后续请求的凭据,抹签名参数会 403) |
+| SimHash + 质量闸 | `meilab/storage/quality.py`:64 位 SimHash(词哈希用 SHA-256 截断——SimHash 只要求词哈希均匀分布,论文用 MD5 只是惯例)+ 汉明距离近重复判定;质量闸按正文长度/链接密度/实词数拒收低质页面 |
+| 声明式站点规则 | `meilab/extract/site_rules.py` + `rules/sites/*.yaml`(bilibili-video / zhihu-question / template);字段写法 `{sel, text/attr, transform}`;`mel rule validate` / `mel rule test` 离线闭环 |
+| ETag/Last-Modified 缓存 | HTTP 通道带条件请求,304 直接复用既有内容 |
+| RSS/Atom/sitemap 播种 | `meilab/router/feed.py`:defusedxml 解析 + **DTD/实体拒绝 + 5MiB 上限**(防实体扩展攻击);解析失败降级为普通页面抓取 |
+| 导出加 SQLite | `export_sqlite`:带 FTS5 全文索引,可直接检索 |
+| orjson | 导出热路径改用 orjson(带 stdlib 降级) |
+
+### 阶段 4:可观测与发版门禁(提交 `2a8e333`)
+
+| 交付 | 内容 |
+|---|---|
+| 可观测 | `stats.jsonl`(逐事件)+ `checkpoint.json`(断点)+ `deadletter.jsonl`(批量落库失败兜底) |
+| 发版门禁 | `tools/release_check.py` **6 项**:版本一致性 / Git 工作区干净 / 全量测试 / ruff 静态基线(只降不升) / 依赖漏洞审计 / 密钥泄漏扫描。任一失败即阻止发布;无法判定的记 **SKIP**,不冒充 PASS |
+| 数字同源 | `tools/doc_numbers.py`:README 与台账里的行数/用例数由脚本生成,杜绝手工抄录互相矛盾 |
+
+### 阶段 5:终验(本次)
+
+发版门禁全绿:
+
+```
+[OK]     版本一致性: 版本一致:0.1.0
+[OK]     Git 工作区干净: 工作区干净
+[OK]     全量测试: ..................................                  [100%]
+[OK]     ruff 静态基线: ruff 错误 0 个(基线 0,只降不升)
+[OK]     依赖漏洞审计: 未发现已知漏洞
+[OK]     密钥泄漏扫描: 未发现疑似密钥
+总计 6 项:通过 6 · 失败 0 · 跳过 0
+```
+
+§9 冒烟全清单重跑:
+
+| # | 项目 | 回执 |
+|---|---|---|
+| 1 | 静态站 | `mel crawl --url https://quotes.toscrape.com/ --max 5` → queued 21 / dispatched 5 / **succeeded 5** / failed 0 |
+| 2 | JS 渲染站 | `mel crawl --url https://quotes.toscrape.com/js/ --max 3` → 通道分布 **http 3 / browser 3**;`/js/` 页 http 通道 0 字符 → 升级 → browser 通道 **1429 字符** |
+| 3 | 指纹自检 | `fingerprint_probe.py` → **标红 0 / 10** |
+| 4 | 统计 | `mel stats` → 通道占比 轻量 60% / 浏览器 40%;仓库 3 篇 |
+| 5 | 导出 | 五格式全过:jsonl 1 / csv 1 / markdown 4 / xlsx 1 / **sqlite 1** |
+| 6 | 断点续传 | `mel resume` 正常 |
+| 7 | 媒体通道 | `mel resolve --url <B站>` → **B 站原生 API**,高清 720P / mp4 / 453,914,132 字节 |
+| 8 | 交互窗口 | `mel shell` → ✓ http 通道 / Quotes to Scrape / 2533 字符 / 3.2s |
+| 9 | 站点规则 | `mel rule validate` 通过;故意写坏的规则报出 3 条问题;`mel rule test` 从真实 B 站页抽出 title/author/description/thumbnail |
+
+本阶段修掉的一个真缺陷:**升级到浏览器通道不消耗 `--max` 预算**。原来"轻量试一次 → 升级"
+会把预算吃掉,循环随即退出,任务留在 pending 永远不跑浏览器通道(实测通道分布 http 8 / browser 0)。
+现在 `_handle_result` 返回"是否终态",升级返回 `False`,`processed` 不计数,
+任务被重新领取并按 `payload.escalate` 派给浏览器通道。修复后通道分布 http 3 / browser 3。
+
+另确认:**正常抓取后无 Worker 进程残留**(实测我们的 python 进程数 = 0);
+之前观察到的 2 个残留来自被中断的运行,不是泄漏。
