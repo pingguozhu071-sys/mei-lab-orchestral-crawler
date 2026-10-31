@@ -111,9 +111,18 @@ def bilibili_resolve(
     if not bvid:
         return None
 
+    cookie_value = ""
+    if cookies:
+        try:
+            from .cookies import cookie_header
+
+            cookie_value = cookie_header(cookies)
+        except Exception:
+            cookie_value = ""  # cookie 不可用时按匿名继续
+
     view = _get_json(
         f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
-        referer=BILIBILI_REFERER, timeout=timeout,
+        referer=BILIBILI_REFERER, timeout=timeout, cookie_header=cookie_value,
     )
     if view.get("code") != 0:
         return None
@@ -125,7 +134,7 @@ def bilibili_resolve(
     play = _get_json(
         f"https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}"
         f"&qn={quality}&fnval=1&fourk=1",
-        referer=BILIBILI_REFERER, timeout=timeout,
+        referer=BILIBILI_REFERER, timeout=timeout, cookie_header=cookie_value,
     )
     if play.get("code") != 0:
         return None

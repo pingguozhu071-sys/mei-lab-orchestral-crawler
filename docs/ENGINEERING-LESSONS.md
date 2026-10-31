@@ -541,6 +541,24 @@ content-range: bytes 0-1023/453914132
 
 不假装成功、不返回空列表让用户以为「这个视频没评论」。
 
+**2026-10-31 补充:用真实登录态 cookie 验证后的最终结论。**
+
+用户提供了含 `SESSDATA` 的 cookie(经 `x/web-interface/nav` 验证 `isLogin: True`,
+cookie 本身有效)。但 `reply/wbi/main` 仍然 `-403`:
+
+1. 正确的 WBI 签名 + 有效登录态 → `-403`;
+2. 加上社区的 `dm_img_list` / `dm_img_str` / `dm_cover_img_str` / `dm_img_inter`
+   风控参数 → 仍 `-403`。
+
+结论:该接口的风控要求**真实浏览器渲染上下文**(`w_webid` 之类只能从渲染后的
+页面状态拿到的字段),纯 API 端路走不通。评论采集的正确路径是浏览器通道
+渲染评论区后从 DOM 提取——登记为媒体通道的工作项,不在 API 端继续追。
+
+同一次验证的正面产出:cookie 转发接通了 `bilibili_resolve`(此前该函数收了
+cookies 参数但没传给 API);DASH 模式(`fnval=4048`)下,带登录态的
+`accept_quality` 解锁到 `[116, 80, 64, 32, 16]`(1080P60)。当前 720P 上限
+是解析器用 `fnval=1`(mp4 durl)造成的格式选择,DASH 是媒体通道的工作项。
+
 ---
 
 ## 依赖
