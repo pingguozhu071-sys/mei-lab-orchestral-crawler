@@ -23,7 +23,7 @@ from typing import Any, Iterable
 from .vault import VaultRecord
 
 #: 导出格式清单
-FORMATS = ("jsonl", "csv", "markdown", "xlsx")
+FORMATS = ("jsonl", "csv", "markdown", "xlsx", "sqlite")
 
 #: 文件名里的非法字符
 _UNSAFE = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -51,10 +51,14 @@ def _group_by_domain(records: Iterable[VaultRecord]) -> dict[str, list[VaultReco
 def export_jsonl(records: Iterable[VaultRecord], output_dir: str | Path) -> list[Path]:
     """导出为 JSONL(每个域名一个文件)。
 
+    **产物层脱敏**:正文里的手机号/邮箱/IP 在写盘前被替换。
+
     :param records: 记录列表。
     :param output_dir: 输出目录。
     :return: 生成的文件路径列表。
     """
+    from ..privacy.sanitizer import sanitize_record, sanitize_text
+
     base = Path(output_dir) / "jsonl"
     base.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -63,8 +67,10 @@ def export_jsonl(records: Iterable[VaultRecord], output_dir: str | Path) -> list
         with path.open("w", encoding="utf-8") as handle:
             for item in items:
                 payload = item.to_row()
-                payload["content"] = item.content
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                payload["content"] = sanitize_text(item.content)
+                handle.write(
+                    json.dumps(sanitize_record(payload), ensure_ascii=False) + "\n"
+                )
         written.append(path)
     return written
 
@@ -72,10 +78,14 @@ def export_jsonl(records: Iterable[VaultRecord], output_dir: str | Path) -> list
 def export_csv(records: Iterable[VaultRecord], output_dir: str | Path) -> list[Path]:
     """导出为 CSV(每个域名一个文件)。
 
+    **产物层脱敏**:正文里的手机号/邮箱/IP 在写盘前被替换。
+
     :param records: 记录列表。
     :param output_dir: 输出目录。
     :return: 生成的文件路径列表。
     """
+    from ..privacy.sanitizer import sanitize_text
+
     base = Path(output_dir) / "csv"
     base.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -99,7 +109,7 @@ def export_csv(records: Iterable[VaultRecord], output_dir: str | Path) -> list[P
                     "first_seen": item.first_seen,
                     "updated_at": item.updated_at,
                     "encrypted": int(item.encrypted),
-                    "content": item.content.replace("\n", " "),
+                    "content": sanitize_text(item.content).replace("\n", " "),
                 }
                 writer.writerow(row)
         written.append(path)
@@ -109,10 +119,14 @@ def export_csv(records: Iterable[VaultRecord], output_dir: str | Path) -> list[P
 def export_markdown(records: Iterable[VaultRecord], output_dir: str | Path) -> list[Path]:
     """导出为 Markdown(每个域名一个目录 + 一个 index.md)。
 
+    **产物层脱敏**:正文里的手机号/邮箱/IP 在写盘前被替换。
+
     :param records: 记录列表。
     :param output_dir: 输出目录。
     :return: 生成的文件路径列表。
     """
+    from ..privacy.sanitizer import sanitize_text, sanitize_url
+
     base = Path(output_dir) / "markdown"
     base.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -123,13 +137,15 @@ def export_markdown(records: Iterable[VaultRecord], output_dir: str | Path) -> l
         for item in items:
             name = f"{safe_name(item.title)[:60] or item.content_hash[:12]}-{item.content_hash[:8]}.md"
             path = domain_dir / name
-            header = f"# {item.title or item.url}\n\n"
+            header = f"# {sanitize_text(item.title) or sanitize_url(item.url)}\n\n"
             meta = (
-                f"- 来源: {item.url}\n"
+                f"- 来源: {sanitize_url(item.url)}\n"
                 f"- 内容哈希: `{item.content_hash}`\n"
                 f"- 版本: {item.version} · 见到 {item.seen_count} 次\n\n"
             )
-            path.write_text(header + meta + item.content + "\n", encoding="utf-8")
+            path.write_text(
+                header + meta + sanitize_text(item.content) + "\n", encoding="utf-8"
+            )
             written.append(path)
             index_lines.append(f"- [{item.title or item.url}]({name}) — {item.url}")
         index_path = domain_dir / "index.md"
@@ -174,12 +190,81 @@ def export_xlsx(records: Iterable[VaultRecord], output_dir: str | Path) -> list[
     return written
 
 
+def export_sqlite(records: Iterable[VaultRecord], output_dir: str | Path) -> list[Path]:
+    """导出为 SQLite(带 FTS5 全文索引,可直接检索)。
+
+    产物层脱敏:正文里的手机号/邮箱/IP 在写盘前被替换。
+
+    :param records: 记录列表。
+    :param output_dir: 输出目录。
+    :return: 生成的文件路径列表。
+    """
+    import sqlite3
+
+    from ..privacy.sanitizer import sanitize_text, sanitize_url
+
+    base = Path(output_dir) / "sqlite"
+    base.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for domain, items in _group_by_domain(records).items():
+        path = base / f"{safe_name(domain)}.sqlite"
+        if path.exists():
+            path.unlink()
+        connection = sqlite3.connect(str(path))
+        try:
+            connection.execute(
+                """
+                CREATE TABLE scrape (
+                    url TEXT PRIMARY KEY,
+                    content_hash TEXT,
+                    title TEXT,
+                    content TEXT,
+                    version INTEGER,
+                    seen_count INTEGER,
+                    updated_at REAL
+                )
+                """
+            )
+            has_fts = True
+            try:
+                connection.execute(
+                    "CREATE VIRTUAL TABLE scrape_fts USING fts5(title, content, content='scrape', content_rowid='rowid')"
+                )
+            except sqlite3.OperationalError:
+                has_fts = False
+            for item in items:
+                cursor = connection.execute(
+                    "INSERT OR REPLACE INTO scrape "
+                    "(url, content_hash, title, content, version, seen_count, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        sanitize_url(item.url), item.content_hash,
+                        sanitize_text(item.title), sanitize_text(item.content),
+                        item.version, item.seen_count, item.updated_at,
+                    ),
+                )
+                if has_fts:
+                    connection.execute(
+                        "INSERT INTO scrape_fts(rowid, title, content) VALUES (?, ?, ?)",
+                        (
+                            cursor.lastrowid,
+                            sanitize_text(item.title), sanitize_text(item.content),
+                        ),
+                    )
+            connection.commit()
+        finally:
+            connection.close()
+        written.append(path)
+    return written
+
+
 #: 格式 → 导出函数
 _EXPORTERS = {
     "jsonl": export_jsonl,
     "csv": export_csv,
     "markdown": export_markdown,
     "xlsx": export_xlsx,
+    "sqlite": export_sqlite,
 }
 
 

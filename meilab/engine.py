@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from .core.queue import TaskQueue, default_db_path
 from .core.types import Episode, Outcome, Task, TaskStatus
 from .extract.pipeline import ExtractionPipeline
+from .extract.site_rules import load_rules, match_rule
 from .router.layer import LayeredRouter, WorkerKind
 from .router.sniff import sniff_url
 from .stealth.profiles import DeviceLibrary
@@ -57,6 +58,10 @@ class EngineConfig:
     cookie_file: str | None = None
     captcha_retry: bool = True
     max_per_domain: int = 20
+    rules_dir: str | None = None
+    use_site_rules: bool = True
+    quality_gate: bool = True
+    feed_seeding: bool = True
     verbose: bool = False
 
     def resolved_db_path(self) -> str:
@@ -121,6 +126,8 @@ class Engine:
         self.router = LayeredRouter(http_timeout=self.config.timeout)
         self.pipeline = ExtractionPipeline()
         self.device_library = DeviceLibrary()
+        # 声明式站点规则:命中就用规则抽字段,没命中走通用启发
+        self.site_rules = load_rules(self.config.rules_dir)
         self.queue = TaskQueue(self.config.resolved_db_path())
         self.vault = Vault(self.config.resolved_vault_path(), key=self.config.vault_key)
         self._pool: WorkerPool | None = None
@@ -547,6 +554,44 @@ class Engine:
         if body is None:
             body = payload.get("body")
         extraction = self.pipeline.extract(body, content_type, url=url)
+
+        # 声明式站点规则:命中就用规则抽结构化字段(覆盖通用启发)
+        if self.config.use_site_rules and body:
+            html_text = body if isinstance(body, str) else bytes(body).decode(
+                "utf-8", errors="replace")
+            rule = match_rule(self.site_rules, url)
+            if rule is not None:
+                try:
+                    structured = rule.extract(html_text, url)
+                except Exception:
+                    structured = {}
+                if structured.get("fields") or structured.get("media"):
+                    extraction.meta["site_rule"] = rule.name
+                    extraction.meta["rule_fields"] = structured.get("fields") or {}
+                    extraction.meta["rule_media"] = structured.get("media") or {}
+                    if not extraction.title:
+                        extraction.title = str(
+                            (structured.get("fields") or {}).get("title") or "")
+
+        # 质量闸:低质量内容拒收隔离,不写进仓库
+        if self.config.quality_gate and extraction.content:
+            from .storage.quality import assess_quality
+
+            quality = assess_quality(extraction.content)
+            extraction.meta["quality"] = {
+                "ok": quality.ok,
+                "score": round(quality.score, 3),
+                "reasons": quality.reasons,
+            }
+            if not quality.ok and len(extraction.content) < 200:
+                episode.outcome = Outcome.DEGRADED
+                episode.error = "质量闸拒收:" + ";".join(quality.reasons)
+                episode.raw_meta = dict(extraction.meta)
+                summary.failed += 1
+                summary.errors.append(f"{url}: {episode.error}")
+                self._finish_task(result.task_id, success=False)
+                self.queue.save_episode(episode)
+                return
         episode.title = extraction.title
         episode.content = extraction.content
         episode.content_hash = extraction.content_hash

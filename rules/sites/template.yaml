@@ -1,0 +1,33 @@
+name: template
+# match: 填你的域名(可写多个);命中方式是"域名出现在 URL 里"
+match: [example.com]
+item_type: post
+detail:
+  fields:
+    # 字段名可以自定义;value 支持三种写法:
+    #   1) 字符串 —— 等价于 {sel: "<字符串>", text: true}
+    #   2) {sel: "CSS 选择器", text: true}   取可见文本
+    #   3) {sel: "CSS 选择器", attr: src}    取属性
+    #   4) {sel: "CSS 选择器", text: true, transform: date_parse}  取文本后转换
+    title:
+      sel: "h1.article-title, h1"
+      text: true
+    author:
+      sel: ".author, .byline"
+      text: true
+    published:
+      sel: "time, .date"
+      text: true
+      transform: date_parse
+    content:
+      sel: ".article-body, .post-content"
+      text: true
+  media:
+    # 媒体字段同理;attr: src 的相对路径会被补成绝对路径
+    images:
+      sel: ".article-body img"
+      attr: src
+    cover:
+      sel: "meta[property='og:image']"
+      attr: content
+# 可用 transform: date_parse / strip / int

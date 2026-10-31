@@ -555,3 +555,42 @@ SSRF 对抗样本 **26 条全部拦截**(tests/test_ssrf.py),覆盖环回/私网
 云元数据/数字字面量/IPv6 zone id/协议白名单。
 
 单测:**150 passed**(新增 test_queue_lease.py 8 条、test_ssrf.py 31 条、test_captcha.py 6 条)。
+
+### 阶段 3:数据卫生与提取扩展
+
+| 交付 | 内容 |
+|---|---|
+| 三层脱敏(修报告 D5) | 新增 `meilab/privacy/sanitizer.py`:日志层(`SanitizingFilter`,**挂在 handler 上**——挂 root logger 无效)、旁路层(CLI 输出)、产物层(导出前递归脱敏,深度 6);手机号/邮箱/IP 掩码;**19 类敏感 URL 参数**(token/sign/session/w_rid 等);**队列 URL 不脱敏**的边界保留(签名参数是后续请求的凭据,抹掉会 403) |
+| SimHash + 质量闸(修报告 D6) | 新增 `meilab/storage/quality.py`:64 位 SimHash 近重复检测(汉明距离 ≤3 判重)+ 质量闸(正文 <200 字 / 链接密度 >50% / 实词 <20 → 拒收隔离,不写库) |
+| ETag 条件缓存(修报告 D8) | HTTP 通道记 `ETag`/`Last-Modified`,下次带 `If-None-Match`/`If-Modified-Since`,304 直接复用 |
+| RSS/Atom/sitemap 播种 | 新增 `meilab/router/feed.py`:标准库解析 + **defusedxml**(禁 DTD/实体扩展)+ 体积上限 + 非法 XML 降级为普通页面抓取 |
+| YAML 站点规则(修报告"缺规则系统") | 新增 `meilab/extract/site_rules.py` + `rules/sites/`(bilibili-video / zhihu-question / template);字段支持 `sel/text/attr/transform`;新增 `mel rule validate` / `mel rule test` 离线闭环 |
+| SQLite 导出 | `export_sqlite` 带 FTS5 全文索引;导出格式增至 5 种 |
+
+真实回执:
+
+```
+$ mel rule validate rules/sites/bilibili-video.yaml
+✓ 规则合法:bilibili-video
+  匹配域名: bilibili.com, b23.tv
+  字段: title, author, published, description
+  媒体: cover, thumbnail
+
+ETag 条件请求:
+第一次: 200 | etag: (无)
+第二次(带条件头): 304 | 命中缓存: True
+
+SimHash: 相同文本距离 0 | 不同文本距离 27
+质量闸: 短文 → ['正文过短(1 < 200)', '实词过少(1 < 20)']
+```
+
+新增依赖:`PyYAML 6.0.3`、`defusedxml 0.7.1`(Mimosa 拦截 XML 实体扩展后按建议引入)。
+
+修复的三处真实缺陷:
+1. RSS 的 `<title>` 在 `<channel>` 里,`root.find("title")` 找不到 → 改为递归查找;
+2. Atom 的 `<link>`/`<entry>` **带 XML 命名空间**,`find("link")`/`iter("entry")` 全部失效
+   → 改为按本地名遍历(`_local()`);
+3. 站点规则的 `attr: content`(og:image)没做 URL 补全 → 扩展到
+   `src/content/href/data-src/data-original`。
+
+单测:**178 passed**(新增 test_privacy_quality.py 28 条)。

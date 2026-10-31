@@ -205,6 +205,7 @@ class HttpWorker(BaseWorker):
         obey_robots: bool = True,
         use_curl: bool = True,
         allow_private: bool = False,
+        cache_enabled: bool = True,
     ) -> None:
         """初始化 HTTP Worker。
 
@@ -218,6 +219,7 @@ class HttpWorker(BaseWorker):
         :param obey_robots: 是否遵守 robots.txt(默认遵守)。
         :param use_curl: 是否优先使用 curl_cffi。
         :param allow_private: 是否允许访问内网地址(默认禁止,SSRF 防护)。
+        :param cache_enabled: 是否启用 ETag/Last-Modified 条件请求。
         """
         super().__init__(inbox, outbox)
         self.delay = max(1.5, float(delay))
@@ -232,9 +234,43 @@ class HttpWorker(BaseWorker):
         self._last_request = 0.0
         # 域名冷却:被 429 限流后,该域名在一段时间内不再发请求
         self._cooldowns: dict[str, float] = {}
+        # 条件请求缓存:URL → {etag, last_modified}
+        self.cache_enabled = cache_enabled
+        self._cache: dict[str, dict[str, str]] = {}
         self._curl = None
         self._curl_failed = False
         self._opener = None
+
+    def _conditional_headers(self, url: str) -> dict[str, str]:
+        """构造条件请求头(ETag / Last-Modified),用于 304 复用。
+
+        :param url: 目标 URL。
+        :return: 条件请求头(没有缓存时为空字典)。
+        """
+        if not self.cache_enabled:
+            return {}
+        cached = self._cache.get(url)
+        if not cached:
+            return {}
+        headers: dict[str, str] = {}
+        if cached.get("etag"):
+            headers["If-None-Match"] = cached["etag"]
+        if cached.get("last_modified"):
+            headers["If-Modified-Since"] = cached["last_modified"]
+        return headers
+
+    def _remember(self, url: str, headers: dict[str, str]) -> None:
+        """记下响应的 ETag / Last-Modified 供下次条件请求。
+
+        :param url: 目标 URL。
+        :param headers: 响应头。
+        """
+        if not self.cache_enabled:
+            return
+        etag = headers.get("etag") or ""
+        last_modified = headers.get("last-modified") or ""
+        if etag or last_modified:
+            self._cache[url] = {"etag": etag, "last_modified": last_modified}
 
     def _get_opener(self) -> Any:
         """惰性构造 urllib opener(内含 lambda,不可 pickle,故不入 __init__)。"""
@@ -400,6 +436,14 @@ class HttpWorker(BaseWorker):
             result.engine = engine
             result.headers = headers
             result.retry_after = self.parse_retry_after(headers.get("retry-after"))
+            if status == 304:
+                # 内容未变:直接复用(不重复解析)
+                result.status = status
+                result.final_url = current
+                result.ok = True
+                result.error = ""
+                result.content_type = headers.get("content-type", "")
+                return
             if status in _REDIRECT_CODES and headers.get("location"):
                 current = urljoin(current, headers["location"])
                 continue
@@ -424,21 +468,27 @@ class HttpWorker(BaseWorker):
         return self._request_urllib(url)
 
     def _request_curl(self, url: str) -> tuple[int, dict[str, str], bytes, str]:
-        """用 curl_cffi 发一次请求(带浏览器 TLS 指纹)。"""
+        """用 curl_cffi 发一次请求(带浏览器 TLS 指纹 + 条件请求头)。"""
         if self._curl is None:
             from curl_cffi import requests as curl_requests  # 第三方库:TLS 指纹模拟
 
             ensure_ascii_ca_bundle()
             self._curl = curl_requests
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        headers.update(self._conditional_headers(url))
         response = self._curl.get(
             url,
             timeout=self.timeout,
             impersonate="chrome",
             allow_redirects=False,
-            headers={"User-Agent": self.user_agent, "Accept-Language": "en-US,en;q=0.9"},
+            headers=headers,
         )
-        headers = {str(k).lower(): str(v) for k, v in dict(response.headers).items()}
-        return int(response.status_code), headers, bytes(response.content or b""), "curl_cffi"
+        resp_headers = {str(k).lower(): str(v) for k, v in dict(response.headers).items()}
+        self._remember(url, resp_headers)
+        return int(response.status_code), resp_headers, bytes(response.content or b""), "curl_cffi"
 
     def _request_urllib(self, url: str) -> tuple[int, dict[str, str], bytes, str]:
         """用标准库 urllib 发一次请求(curl_cffi 不可用时的回退)。"""
@@ -452,9 +502,13 @@ class HttpWorker(BaseWorker):
         )
         ca_path = ensure_ascii_ca_bundle()
         context = ssl.create_default_context(cafile=ca_path) if ca_path else None
+        request.add_header("Accept-Language", "en-US,en;q=0.9")
+        for key, value in self._conditional_headers(url).items():
+            request.add_header(key, value)
         try:
             with self._get_opener().open(request, timeout=self.timeout) as resp:
                 headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+                self._remember(url, headers)
                 return int(resp.status), headers, resp.read(MAX_BODY_BYTES), "urllib"
         except urllib.error.HTTPError as exc:
             headers = {str(k).lower(): str(v) for k, v in (exc.headers or {}).items()}

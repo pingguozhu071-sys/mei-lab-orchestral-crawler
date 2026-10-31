@@ -161,7 +161,7 @@ def stats(db: str | None, output: str, as_json: bool) -> None:
 
 @cli.command()
 @click.option("--format", "fmt", default="markdown",
-              type=click.Choice(["jsonl", "csv", "markdown", "xlsx"]), help="导出格式")
+              type=click.Choice(["jsonl", "csv", "markdown", "xlsx", "sqlite"]), help="导出格式")
 @click.option("--output", "-o", default="./data", help="输出目录")
 @click.option("--db", default=None, help="队列数据库路径")
 def export(fmt: str, output: str, db: str | None) -> None:
@@ -283,6 +283,82 @@ def comments(url: str, page: int, limit: int, cookies: str | None, as_json: bool
     for item in items[:limit]:
         console.print(f"[cyan]{item.get('author')}[/cyan] ({item.get('like')} 赞)")
         console.print(f"  {item.get('message')}")
+
+
+@cli.group("rule")
+def rule_group() -> None:
+    """站点规则工具(声明式 YAML)。"""
+
+
+@rule_group.command("validate")
+@click.argument("path", type=click.Path())
+def rule_validate(path: str) -> None:
+    """校验一条规则文件。"""
+    from .extract.site_rules import load_rule_file
+
+    rule, issues = load_rule_file(path)
+    if issues:
+        for issue in issues:
+            console.print(f"[red]✗[/red] {issue}")
+        raise SystemExit(1)
+    console.print(f"[green]✓[/green] 规则合法:{rule.name if rule else path}")
+    if rule:
+        console.print(f"  匹配域名: {', '.join(rule.match)}")
+        console.print(f"  字段: {', '.join(rule.fields) or '(无)'}")
+        console.print(f"  媒体: {', '.join(rule.media) or '(无)'}")
+
+
+@rule_group.command("test")
+@click.argument("path", type=click.Path())
+@click.option("--url", "-u", required=True, help="试跑用的 URL")
+@click.option("--timeout", default=30.0, type=float, help="抓取超时(秒)")
+def rule_test(path: str, url: str, timeout: float) -> None:
+    """用真实 URL 试跑一条规则(离线闭环)。"""
+    from .extract.site_rules import load_rule_file
+    from .workers.http import HttpWorker
+
+    rule, issues = load_rule_file(path)
+    if issues:
+        for issue in issues:
+            console.print(f"[red]✗[/red] {issue}")
+        raise SystemExit(1)
+    if rule is None:
+        console.print("[red]规则加载失败[/red]")
+        raise SystemExit(1)
+    if not rule.matches(url):
+        console.print(f"[yellow]规则 {rule.name} 不匹配该 URL(match: {rule.match})[/yellow]")
+        raise SystemExit(1)
+
+    worker = HttpWorker(None, None)
+    result = worker.fetch(url)
+    if not result.ok:
+        console.print(f"[red]抓取失败[/red] {result.error}")
+        raise SystemExit(1)
+    extracted = rule.extract(result.text, url)
+    console.print(f"[green]✓[/green] {rule.name} 命中 {url}")
+    for name, value in (extracted.get("fields") or {}).items():
+        console.print(f"  [cyan]{name}[/cyan]: {str(value)[:100]}")
+    for name, value in (extracted.get("media") or {}).items():
+        console.print(f"  [magenta]{name}[/magenta]: {str(value)[:100]}")
+    if not (extracted.get("fields") or extracted.get("media")):
+        console.print("[yellow]没有抽到任何字段(选择器可能已失效)[/yellow]")
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.option("--url", "-u", required=True, help="RSS / Atom / sitemap 地址")
+@click.option("--max", "max_links", default=50, type=int, help="最多返回多少链接")
+def feed(url: str, max_links: int) -> None:
+    """解析订阅源,列出里面的链接(播种用)。"""
+    from .router.feed import fetch_feed
+
+    result = fetch_feed(url)
+    if not result.ok:
+        console.print(f"[red]解析失败[/red] {result.error}")
+        raise SystemExit(1)
+    console.print(f"[green]✓[/green] {result.kind} | {result.title}")
+    for link in result.links[:max_links]:
+        console.print(f"  - {link}")
 
 
 #: 交互式会话的内置命令
@@ -422,6 +498,10 @@ def shell(
 
 def main() -> None:
     """CLI 入口(被 pyproject 的 ``mel`` 脚本调用)。"""
+    from .privacy.sanitizer import install_log_filter
+
+    # 日志层脱敏:过滤器必须挂在 handler 上,挂在 root logger 上无效
+    install_log_filter()
     try:
         cli()
     except KeyboardInterrupt:

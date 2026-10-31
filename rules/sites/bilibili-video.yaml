@@ -1,0 +1,25 @@
+name: bilibili-video
+match: [bilibili.com, b23.tv]
+item_type: video
+detail:
+  fields:
+    title:
+      sel: "h1.video-title, h1[data-v-6c0f9b8a]"
+      text: true
+    author:
+      sel: ".up-name, a.up-name"
+      text: true
+    published:
+      sel: ".pubdate, .video-info .pubdate"
+      text: true
+      transform: date_parse
+    description:
+      sel: ".video-desc-container, #v_desc"
+      text: true
+  media:
+    cover:
+      sel: ".video-cover img, .bili-video-cover__image"
+      attr: src
+    thumbnail:
+      sel: "meta[property='og:image']"
+      attr: content
