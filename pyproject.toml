@@ -5,8 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "meilab-orchestral-crawler"
 version = "0.1.0"
-description = "分层调度 + 多格式提取 + 反检测的 Python 爬虫框架"
-readme = "README.md"
+description = "Layered-dispatch crawling engine with multi-format extraction and anti-detection"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 

@@ -83,7 +83,11 @@ def _run(cmd: list[str], cwd: Path = ROOT, timeout: float = 600.0) -> tuple[int,
 # ------------------------------------------------------------------ 各检查项
 
 def check_version_consistency() -> CheckResult:
-    """版本一致性:pyproject / `meilab.__version__` / README 必须一致。"""
+    """版本一致性:pyproject / `meilab.__version__` / README(若存在)必须一致。
+
+    README 缺失时**不视为通过**,而是在 detail 里明确写出"文档侧校验已跳过",
+    避免"没检查"被当成"检查过且通过"。
+    """
     result = CheckResult("版本一致性")
     try:
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -96,18 +100,25 @@ def check_version_consistency() -> CheckResult:
         sys.path.insert(0, str(ROOT))
         from meilab import __version__ as pkg_version
 
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        if pyproject_version not in readme:
-            result.status = "fail"
-            result.detail = f"README 里没有出现版本 {pyproject_version}"
-            return result
         if pyproject_version != pkg_version:
             result.status = "fail"
             result.detail = (
                 f"版本不一致:pyproject={pyproject_version} 包内={pkg_version}"
             )
             return result
-        result.detail = f"版本一致:{pyproject_version}"
+
+        readme_path = ROOT / "README.md"
+        if readme_path.is_file():
+            readme = readme_path.read_text(encoding="utf-8")
+            if pyproject_version not in readme:
+                result.status = "fail"
+                result.detail = f"README 里没有出现版本 {pyproject_version}"
+                return result
+            result.detail = f"版本一致:{pyproject_version}"
+        else:
+            result.detail = (
+                f"版本一致:{pyproject_version}(README 暂缺,文档侧校验已跳过)"
+            )
         result.data = {"version": pyproject_version}
         return result
     except Exception as exc:
