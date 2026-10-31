@@ -89,21 +89,46 @@ def collect() -> dict[str, Any]:
     }
 
 
-def render_block(numbers: dict[str, Any]) -> str:
+#: 英文文档里的标签(README.md 是英文版)
+LABELS_EN: dict[str, str] = {
+    "包内模块数": "Package modules",
+    "包内代码行": "Package lines",
+    "测试文件数": "Test files",
+    "测试代码行": "Test lines",
+    "测试函数数": "Test functions",
+    "站点规则数": "Site rules",
+}
+
+
+def labels_for(path: Path) -> dict[str, str] | None:
+    """按文件名选择标签集。
+
+    :param path: 文档路径。
+    :return: 标签映射;``None`` 表示用中文键名。
+    """
+    return LABELS_EN if path.name == "README.md" else None
+
+
+def render_block(numbers: dict[str, Any], labels: dict[str, str] | None = None) -> str:
     """把数字字典渲染成 markdown 表格块。
 
     :param numbers: 数字字典。
+    :param labels: 键名 → 显示名;为空则直接用键名。
     :return: markdown 文本。
     """
-    lines = [BLOCK_START, "", "| 指标 | 数值 |", "|---|---|"]
+    mapping = labels or {}
+    head = ("Metric", "Value") if labels else ("指标", "数值")
+    lines = [BLOCK_START, "", f"| {head[0]} | {head[1]} |", "|---|---|"]
     for key, value in numbers.items():
-        lines.append(f"| {key} | {value} |")
+        lines.append(f"| {mapping.get(key, key)} | {value} |")
     lines.extend(["", BLOCK_END])
     return "\n".join(lines)
 
 
 def check_document(path: Path) -> tuple[bool, list[str]]:
     """校验文档里的自动数字块是否与现状一致。
+
+    同时接受中文键名与英文标签,这样同一份统计可以出现在多语言文档里。
 
     :param path: 文档路径。
     :return: ``(是否一致, 问题清单)``。
@@ -116,13 +141,14 @@ def check_document(path: Path) -> tuple[bool, list[str]]:
     problems: list[str] = []
     numbers = collect()
     for key, value in numbers.items():
-        # 在自动块范围内找形如 "| 指标 | 数字 |" 的行
-        pattern = re.compile(rf"\|\s*{re.escape(key)}\s*\|\s*(\d+)\s*\|")
-        for match in pattern.finditer(text):
-            if int(match.group(1)) != int(value):
-                problems.append(
-                    f"{path.name}: 「{key}」文档写 {match.group(1)},实际 {value}"
-                )
+        names = {key, LABELS_EN.get(key, key)}
+        for name in names:
+            pattern = re.compile(rf"\|\s*{re.escape(name)}\s*\|\s*(\d+)\s*\|")
+            for match in pattern.finditer(text):
+                if int(match.group(1)) != int(value):
+                    problems.append(
+                        f"{path.name}: 「{name}」文档写 {match.group(1)},实际 {value}"
+                    )
     return (not problems), problems
 
 
@@ -140,7 +166,7 @@ def write_document(path: Path, numbers: dict[str, Any]) -> bool:
         return False
     start = text.index(BLOCK_START)
     end = text.index(BLOCK_END) + len(BLOCK_END)
-    updated = text[:start] + render_block(numbers) + text[end:]
+    updated = text[:start] + render_block(numbers, labels_for(path)) + text[end:]
     if updated == text:
         return False
     path.write_text(updated, encoding="utf-8")
